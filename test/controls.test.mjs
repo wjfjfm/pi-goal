@@ -20,14 +20,14 @@ test('footer shows goal lifecycle and clears on clear or empty session restore',
   const status=()=>h.statuses.at(-1);
   h.handlers.session_start({},h.ctx);assert.deepEqual(status(),['pi-goal',undefined]);
   await h.run('target');assert.match(status()[1],/^Pursuing goal \(/);
-  await h.run('pause');assert.equal(status()[1],'Goal paused (/goal continue)');
+  await h.run('pause');assert.equal(status()[1],'Goal paused (/goal resume)');
   await h.run('continue');assert.match(status()[1],/^Pursuing goal/);
   h.handlers.turn_end({},h.ctx);assert.match(status()[1],/^Pursuing goal/);
   await h.tools.get('goal_update').execute('done',{status:'complete'},undefined,undefined,h.ctx);
   assert.match(status()[1],/^Goal achieved \(/);
   await h.run('clear');assert.deepEqual(status(),['pi-goal',undefined]);
   await h.run('new');h.handlers.session_start({},h.ctx);
-  assert.equal(status()[1],'Goal paused (/goal continue)');
+  assert.equal(status()[1],'Goal paused (/goal resume)');
   h.entries.length=0;h.handlers.session_tree({},h.ctx);
   assert.deepEqual(status(),['pi-goal',undefined]);
   assert.equal(h.messages.length,2);
@@ -115,9 +115,9 @@ test('busy agent queues replacement and rejects old completion until delivery; m
   const absent=fixture({codemode:false});await absent.run('target');
   assert.equal(absent.entries.length,0);assert.equal(absent.messages.length,0);
 });
-test('menu reports state and time, shortcuts pause/continue/clear',async()=>{
+test('menu reports state and time, shortcuts pause/resume/clear',async()=>{
   const h=fixture();await h.run('menu goal'); h.ctx.hasUI=true;
-  for (const [key,status] of [['p','paused'],['c','active'],['x','closed']]) {
+  for (const [key,status] of [['p','paused'],['r','active'],['x','closed']]) {
     h.ctx.ui.custom=async factory=>{
       let result;
       const component=await factory({requestRender(){}},{},{},value=>result=value);

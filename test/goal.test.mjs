@@ -82,7 +82,7 @@ test('agent can pause through real codemode and user can resume', async t => {
   assert.equal(state().status,'paused');
   assert.equal(h.api.getAllTools().find(t=>t.name==='goal_update').exposure,'hidden');
   assert.doesNotMatch(JSON.stringify(h.requests[1].messages), /goal still active:/);
-  await h.session.prompt('/goal continue');
+  await h.session.prompt('/goal resume');
   assert.equal(h.requests.length,2);
   assert.equal(state().status,'active');
   await h.session.prompt('Proceed'); await settled(h.session);
@@ -114,7 +114,7 @@ test('new goal during a running tool is delivered after its result, before the n
   const state=()=>h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data;
   assert.equal(state().text,'replacement');
   await h.session.prompt('/goal pause');assert.equal(state().status,'paused');
-  await h.session.prompt('/goal continue');assert.equal(state().status,'active');
+  await h.session.prompt('/goal resume');assert.equal(state().status,'active');
   assert.equal(h.requests.length,1);
   release();await settled(h.session);
   assert.equal(h.requests.length,3);
