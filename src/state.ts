@@ -30,7 +30,7 @@ export class GoalState {
     this.goal = { text: g.text, elapsedMs: g.elapsedMs, status: g.status === "active" ? "paused" : g.status };
   }
 }
-export function reminder(text: string, kind: "set" | "changed" | "still active") {
+export function reminder(text: string, kind: "set" | "changed" | "resumed" | "still active") {
   return `goal ${kind}: ${text}\n\nUse codemode tools.goal_update({status:"complete"|"pause"}) when done or blocked.`;
 }
 export function duration(ms: number) {

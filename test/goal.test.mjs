@@ -82,10 +82,8 @@ test('agent can pause through real codemode and user can resume', async t => {
   assert.equal(state().status,'paused');
   assert.equal(h.api.getAllTools().find(t=>t.name==='goal_update').exposure,'hidden');
   assert.doesNotMatch(JSON.stringify(h.requests[1].messages), /goal still active:/);
-  await h.session.prompt('/goal resume');
-  assert.equal(h.requests.length,2);
-  assert.equal(state().status,'active');
-  await h.session.prompt('Proceed'); await settled(h.session);
+  await h.session.prompt('/goal resume'); await settled(h.session);
+  assert.match(JSON.stringify(h.requests[2].messages),/goal resumed: needs input/);
   assert.equal(h.requests.length,4);
   assert.equal(state().status,'complete');
 });
@@ -101,6 +99,10 @@ test('new goal during a running tool is delivered after its result, before the n
       const result=messages.findIndex(m=>m.role==='toolResult'&&m.toolCallId==='hold');
       const changed=messages.findIndex(m=>m.role==='user'&&JSON.stringify(m.content).includes('goal changed: replacement'));
       assert.ok(result>=0&&changed>result,'replacement must follow the completed tool batch');
+      return {};
+    }
+    if(n===3){
+      assert.match(JSON.stringify(context.messages),/goal resumed: replacement/);
       return complete;
     }
     return {};
@@ -117,7 +119,7 @@ test('new goal during a running tool is delivered after its result, before the n
   await h.session.prompt('/goal resume');assert.equal(state().status,'active');
   assert.equal(h.requests.length,1);
   release();await settled(h.session);
-  assert.equal(h.requests.length,3);
+  assert.equal(h.requests.length,4);
   assert.equal(state().status,'complete');
 });
 
@@ -126,10 +128,8 @@ test('provider failure pauses goal rather than looping; continue and clear comma
   await h.session.prompt('/goal retry goal'); await settled(h.session);
   const state=()=>h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data;
   assert.equal(state().status,'paused'); assert.equal(h.requests.length,1);
-  await h.session.prompt('/goal continue');
-  assert.equal(h.requests.length,1);
-  assert.equal(state().status,'active');
-  await h.session.prompt('Proceed'); await settled(h.session);
+  await h.session.prompt('/goal continue'); await settled(h.session);
+  assert.match(JSON.stringify(h.requests[1].messages),/goal resumed: retry goal/);
   assert.equal(state().status,'complete'); assert.equal(h.requests.length,3);
   await h.session.prompt('/goal clear'); assert.equal(state().status,'closed');
   await h.session.prompt('/goal continue'); assert.equal(h.requests.length,3);

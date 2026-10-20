@@ -41,7 +41,7 @@ export default function goalExtension(pi: ExtensionAPI) {
       },
     });
   }
-  function message(kind: "set" | "changed" | "still active") {
+  function message(kind: "set" | "changed" | "resumed" | "still active") {
     return { customType: MESSAGE, content: reminder(state.goal!.text, kind), display: true };
   }
   function restore(ctx: ExtensionContext) {
@@ -77,9 +77,12 @@ export default function goalExtension(pi: ExtensionAPI) {
     if (args === "resume" || args === "continue") {
       if (state.goal?.status !== "paused") return ctx.ui.notify("No paused goal.", "info");
       if (!ensureCodemode(ctx)) return;
+      pendingGoal = randomUUID();
       state.transition("active");
       save(); expose();
       ctx.ui.notify("Goal active.", "info");
+      pi.sendMessage({ ...message("resumed"), details: { goalDelivery: pendingGoal } },
+        { triggerTurn: true, deliverAs: "steer" });
       return;
     }
     if (!ensureCodemode(ctx)) return;
