@@ -10,7 +10,19 @@ export default function goalExtension(pi: ExtensionAPI) {
   const state = new GoalState();
   // A replacement cannot be completed by tools from the still-running old turn.
   let pendingGoal: string | undefined;
-  function save() { pi.appendEntry(ENTRY, state.snapshot()); }
+  let uiContext: ExtensionContext | undefined;
+  function updateStatus(ctx = uiContext) {
+    if (!ctx?.hasUI) return;
+    const status = state.goal?.status;
+    const text = status === "active" ? `Pursuing goal (${duration(state.elapsed())})`
+      : status === "paused" ? "Goal paused (/goal continue)"
+      : status === "complete" ? `Goal achieved (${duration(state.elapsed())})` : undefined;
+    ctx.ui.setStatus("pi-goal", text);
+  }
+  function save() {
+    pi.appendEntry(ENTRY, state.snapshot());
+    updateStatus();
+  }
   function expose() {
     pi.registerTool({
       name: "goal_update", label: "Update goal",
@@ -33,11 +45,13 @@ export default function goalExtension(pi: ExtensionAPI) {
     return { customType: MESSAGE, content: reminder(state.goal!.text, kind), display: true };
   }
   function restore(ctx: ExtensionContext) {
+    uiContext = ctx;
     const entry = [...ctx.sessionManager.getBranch()].reverse()
       .find(e => e.type === "custom" && e.customType === ENTRY);
     pendingGoal = undefined;
     state.restore(entry?.type === "custom" ? entry.data : undefined);
     expose();
+    updateStatus(ctx);
     if (state.goal) ctx.ui.notify(`Goal restored: ${state.goal.status}.`, "info");
   }
   function ensureCodemode(ctx: ExtensionContext) {
@@ -50,6 +64,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     return true;
   }
   async function action(args: string, ctx: ExtensionCommandContext) {
+    uiContext = ctx;
     if (args === "exit") args = "clear";
     if (args === "parse" || args === "pause" || args === "clear") {
       if (!state.goal) return ctx.ui.notify("No goal set.", "info");
@@ -116,6 +131,8 @@ export default function goalExtension(pi: ExtensionAPI) {
     pendingGoal = undefined;
     expose();
   });
+  // Refresh elapsed time on activity, without a timer forcing terminal redraws.
+  pi.on("turn_end", (_event, ctx) => updateStatus(ctx));
   pi.on("session_start", (_event, ctx) => restore(ctx));
   pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.on("session_shutdown", () => {

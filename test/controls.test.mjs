@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import extension from '../dist/index.js';
 function fixture({codemode=true}={}) {
-  const handlers={},tools=new Map(),entries=[],messages=[],notices=[];
+  const handlers={},tools=new Map(),entries=[],messages=[],notices=[],statuses=[];
   let command, idle=true, pending=false, active=['read'];
   const pi={
     registerTool:t=>tools.set(t.name,t), registerCommand:(_n,c)=>command=c.handler,
@@ -11,10 +11,28 @@ function fixture({codemode=true}={}) {
     getAllTools:()=>[...(codemode?[{name:'codemode'}]:[]),...tools.values()],
     getActiveTools:()=>active,setActiveTools:a=>active=a,
   };
-  const ctx={hasUI:false,isIdle:()=>idle,hasPendingMessages:()=>pending,sessionManager:{getBranch:()=>entries},ui:{notify:(...args)=>notices.push(args)}};
+  const ctx={hasUI:false,isIdle:()=>idle,hasPendingMessages:()=>pending,sessionManager:{getBranch:()=>entries},ui:{notify:(...args)=>notices.push(args),setStatus:(...args)=>statuses.push(args)}};
   extension(pi);
-  return {handlers,tools,entries,messages,notices,ctx,run:arg=>command(arg,ctx),idle:v=>idle=v,pending:v=>pending=v,active:()=>active,state:()=>entries.at(-1)?.data};
+  return {handlers,tools,entries,messages,notices,statuses,ctx,run:arg=>command(arg,ctx),idle:v=>idle=v,pending:v=>pending=v,active:()=>active,state:()=>entries.at(-1)?.data};
 }
+test('footer shows goal lifecycle and clears on clear or empty session restore',async()=>{
+  const h=fixture();h.ctx.hasUI=true;
+  const status=()=>h.statuses.at(-1);
+  h.handlers.session_start({},h.ctx);assert.deepEqual(status(),['pi-goal',undefined]);
+  await h.run('target');assert.match(status()[1],/^Pursuing goal \(/);
+  await h.run('pause');assert.equal(status()[1],'Goal paused (/goal continue)');
+  await h.run('continue');assert.match(status()[1],/^Pursuing goal/);
+  h.handlers.turn_end({},h.ctx);assert.match(status()[1],/^Pursuing goal/);
+  await h.tools.get('goal_update').execute('done',{status:'complete'},undefined,undefined,h.ctx);
+  assert.match(status()[1],/^Goal achieved \(/);
+  await h.run('clear');assert.deepEqual(status(),['pi-goal',undefined]);
+  await h.run('new');h.handlers.session_start({},h.ctx);
+  assert.equal(status()[1],'Goal paused (/goal continue)');
+  h.entries.length=0;h.handlers.session_tree({},h.ctx);
+  assert.deepEqual(status(),['pi-goal',undefined]);
+  assert.equal(h.messages.length,2);
+});
+
 test('state transitions notify the user without adding status messages to model context', async()=>{
   const h=fixture();
   const notice=()=>h.notices.at(-1)?.[0];
