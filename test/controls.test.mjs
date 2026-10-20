@@ -15,7 +15,7 @@ function fixture({codemode=true}={}) {
   extension(pi);
   return {handlers,tools,entries,messages,notices,ctx,run:arg=>command(arg,ctx),idle:v=>idle=v,pending:v=>pending=v,active:()=>active,state:()=>entries.at(-1)?.data};
 }
-test('pause/parse stop continuation, continue resumes, exit hides the tool', async()=>{
+test('pause/parse stop continuation, continue resumes, clear hides the tool', async()=>{
   const h=fixture(); await h.run('target');
   assert.deepEqual(h.active(),['read','codemode']);
   assert.equal(h.tools.get('goal_update').exposure,'codemode');
@@ -27,7 +27,7 @@ test('pause/parse stop continuation, continue resumes, exit hides the tool', asy
     await h.run('continue'); assert.equal(h.state().status,'active');
   }
   assert.equal(h.messages.length,1);
-  await h.run('exit'); assert.equal(h.state().status,'closed');
+  await h.run('clear'); assert.equal(h.state().status,'closed');
   assert.equal(h.tools.get('goal_update').exposure,'hidden');
 });
 test('pending messages and existing boundary continuation suppress redundant reminders',async()=>{
@@ -72,7 +72,7 @@ test('busy agent queues replacement and rejects old completion until delivery; m
   const absent=fixture({codemode:false});await absent.run('target');
   assert.equal(absent.entries.length,0);assert.equal(absent.messages.length,0);
 });
-test('menu reports state and time, shortcuts pause/continue/exit',async()=>{
+test('menu reports state and time, shortcuts pause/continue/clear',async()=>{
   const h=fixture();await h.run('menu goal'); h.ctx.hasUI=true;
   for (const [key,status] of [['p','paused'],['c','active'],['x','closed']]) {
     h.ctx.ui.custom=async factory=>{

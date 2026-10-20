@@ -121,7 +121,7 @@ test('new goal during a running tool is delivered after its result, before the n
   assert.equal(state().status,'complete');
 });
 
-test('provider failure pauses goal rather than looping; continue and exit commands work', async t => {
+test('provider failure pauses goal rather than looping; continue and clear commands work', async t => {
   const h=await fixture(t,n=>n===1?{error:'test failure'}:n===2?complete:{});
   await h.session.prompt('/goal retry goal'); await settled(h.session);
   const state=()=>h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data;
@@ -131,6 +131,6 @@ test('provider failure pauses goal rather than looping; continue and exit comman
   assert.equal(state().status,'active');
   await h.session.prompt('Proceed'); await settled(h.session);
   assert.equal(state().status,'complete'); assert.equal(h.requests.length,3);
-  await h.session.prompt('/goal exit'); assert.equal(state().status,'closed');
+  await h.session.prompt('/goal clear'); assert.equal(state().status,'closed');
   await h.session.prompt('/goal continue'); assert.equal(h.requests.length,3);
 });

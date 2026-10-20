@@ -48,12 +48,13 @@ export default function goalExtension(pi: ExtensionAPI) {
     return true;
   }
   async function action(args: string, ctx: ExtensionCommandContext) {
-    if (args === "parse" || args === "pause" || args === "exit") {
+    if (args === "exit") args = "clear";
+    if (args === "parse" || args === "pause" || args === "clear") {
       if (!state.goal) return ctx.ui.notify("No goal set.", "info");
-      if (args !== "exit" && state.goal.status !== "active") return;
-      state.transition(args === "exit" ? "closed" : "paused");
+      if (args !== "clear" && state.goal.status !== "active") return;
+      state.transition(args === "clear" ? "closed" : "paused");
       save(); expose();
-      ctx.ui.notify(args === "exit" ? "Goal closed." : "Goal paused; the current agent turn is not interrupted.", "info");
+      ctx.ui.notify(args === "clear" ? "Goal cleared." : "Goal paused; the current agent turn is not interrupted.", "info");
       return;
     }
     if (args === "continue") {
@@ -72,7 +73,7 @@ export default function goalExtension(pi: ExtensionAPI) {
       { triggerTurn: true, deliverAs: "steer" });
   }
   pi.registerCommand("goal", {
-    description: "Set a goal, view status, or pause / continue / exit.",
+    description: "Set a goal, view status, or pause / continue / clear.",
     async handler(args, ctx) {
       args = args.trim();
       if (args) return action(args, ctx);
@@ -86,7 +87,7 @@ export default function goalExtension(pi: ExtensionAPI) {
         return {
           render(width) {
             view.setText(state.goal
-              ? `Goal: ${state.goal.text}\nStatus: ${state.goal.status}\nRunning time: ${duration(state.elapsed())}\n\n[p] Pause  [c] Continue  [x] Close goal  [Esc] Back`
+              ? `Goal: ${state.goal.text}\nStatus: ${state.goal.status}\nRunning time: ${duration(state.elapsed())}\n\n[p] Pause  [c] Continue  [x] Clear goal  [Esc] Back`
               : "No goal set. Use /goal <text>.\n\n[Esc] Back");
             return view.render(width);
           },
@@ -95,7 +96,7 @@ export default function goalExtension(pi: ExtensionAPI) {
             if (matchesKey(data, Key.escape)) done(undefined);
             else if (data === "p") done("pause");
             else if (data === "c") done("continue");
-            else if (data === "x") done("exit");
+            else if (data === "x") done("clear");
           },
           dispose() { clearInterval(timer); },
         };
