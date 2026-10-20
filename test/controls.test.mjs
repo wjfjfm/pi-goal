@@ -15,6 +15,31 @@ function fixture({codemode=true}={}) {
   extension(pi);
   return {handlers,tools,entries,messages,notices,ctx,run:arg=>command(arg,ctx),idle:v=>idle=v,pending:v=>pending=v,active:()=>active,state:()=>entries.at(-1)?.data};
 }
+test('state transitions notify the user without adding status messages to model context', async()=>{
+  const h=fixture();
+  const notice=()=>h.notices.at(-1)?.[0];
+  await h.run('first');assert.equal(notice(),'Goal set: active.');
+  await h.run('second');assert.equal(notice(),'Goal changed: active.');
+  const count=h.messages.length;
+  await h.run('pause');assert.match(notice(),/^Goal paused/);
+  await h.run('continue');assert.equal(notice(),'Goal active.');
+  await h.tools.get('goal_update').execute('pause',{status:'pause'},undefined,undefined,h.ctx);
+  assert.equal(notice(),'Goal paused.');
+  await h.run('continue');
+  await h.tools.get('goal_update').execute('complete',{status:'complete'},undefined,undefined,h.ctx);
+  assert.equal(notice(),'Goal completed.');
+  await h.run('clear');assert.equal(notice(),'Goal cleared.');
+  assert.equal(h.messages.length,count);
+  await h.run('third');
+  h.handlers.agent_before_settle({outcome:'error'},h.ctx);
+  assert.equal(notice(),'Goal paused after an error.');
+  await h.run('continue');
+  h.handlers.agent_before_settle({outcome:'aborted'},h.ctx);
+  assert.equal(notice(),'Goal paused after interruption.');
+  h.handlers.session_start({},h.ctx);
+  assert.equal(notice(),'Goal restored: paused.');
+});
+
 test('pause/parse stop continuation, continue resumes, clear hides the tool', async()=>{
   const h=fixture(); await h.run('target');
   assert.deepEqual(h.active(),['read','codemode']);

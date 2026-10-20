@@ -17,13 +17,14 @@ export default function goalExtension(pi: ExtensionAPI) {
       description: "Complete the active goal when its requirements are satisfied, or pause it when blocked or awaiting user input.",
       exposure: state.goal?.status === "active" && !pendingGoal ? "codemode" : "hidden",
       parameters: Type.Object({ status: Type.Union([Type.Literal("complete"), Type.Literal("pause")]) }),
-      async execute(_id, args, signal) {
+      async execute(_id, args, signal, _onUpdate, ctx) {
         if (signal?.aborted) throw new Error("Goal update cancelled.");
         if (pendingGoal) throw new Error("New goal is awaiting delivery.");
         if (state.goal?.status !== "active") throw new Error("No active goal.");
         state.transition(args.status === "pause" ? "paused" : "complete");
         save();
         expose();
+        ctx.ui.notify(args.status === "pause" ? "Goal paused." : "Goal completed.", "info");
         return { content: [{ type: "text", text: args.status === "pause" ? "Goal paused." : "Goal completed." }], details: undefined };
       },
     });
@@ -37,6 +38,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     pendingGoal = undefined;
     state.restore(entry?.type === "custom" ? entry.data : undefined);
     expose();
+    if (state.goal) ctx.ui.notify(`Goal restored: ${state.goal.status}.`, "info");
   }
   function ensureCodemode(ctx: ExtensionContext) {
     if (!pi.getAllTools().some(t => t.name === "codemode")) {
@@ -62,6 +64,7 @@ export default function goalExtension(pi: ExtensionAPI) {
       if (!ensureCodemode(ctx)) return;
       state.transition("active");
       save(); expose();
+      ctx.ui.notify("Goal active.", "info");
       return;
     }
     if (!ensureCodemode(ctx)) return;
@@ -69,6 +72,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     pendingGoal = randomUUID();
     state.set(args);
     save(); expose();
+    ctx.ui.notify(kind === "set" ? "Goal set: active." : "Goal changed: active.", "info");
     pi.sendMessage({ ...message(kind), details: { goalDelivery: pendingGoal } },
       { triggerTurn: true, deliverAs: "steer" });
   }
@@ -122,6 +126,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     if (event.outcome !== "completed" || ctx.signal?.aborted) {
       pendingGoal = undefined;
       state.transition("paused"); save(); expose();
+      ctx.ui.notify(event.outcome === "error" ? "Goal paused after an error." : "Goal paused after interruption.", "info");
       return;
     }
     save();
