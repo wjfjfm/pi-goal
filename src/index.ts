@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { setTimeout as delay } from "node:timers/promises";
+import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
 import { Text, matchesKey, Key } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { GoalState, reminder, duration } from "./state.js";
@@ -11,6 +12,41 @@ export default function goalExtension(pi: ExtensionAPI) {
   // A replacement cannot be completed by tools from the still-running old turn.
   let pendingGoal: string | undefined;
   let uiContext: ExtensionContext | undefined;
+  let retryCount = 0;
+  let retryRequested = false;
+  let retryAbort: AbortController | undefined;
+  function cancelRetry() {
+    retryAbort?.abort(); retryAbort = undefined; retryCount = 0; retryRequested = false;
+  }
+  async function retryError(entries: SessionBoundaryDraft[], ctx: ExtensionContext) {
+    if (retryAbort || pendingGoal || ctx.hasPendingMessages()) return;
+    if (retryCount >= 3) {
+      state.transition("paused"); save(); expose();
+      ctx.ui.notify("Goal paused after 3 failed automatic retries. Use /goal resume to retry.","warning");
+      return;
+    }
+    const attempt = ++retryCount;
+    const controller = new AbortController();
+    retryAbort = controller;
+    const abort = () => controller.abort();
+    ctx.signal?.addEventListener("abort",abort,{once:true});
+    ctx.ui.notify(`Goal error; automatically resuming in ${2 ** (attempt-1)}s (${attempt}/3).`,"warning");
+    try {
+      await delay(1000 * 2 ** (attempt-1),undefined,{signal:controller.signal});
+      if (state.goal?.status !== "active" || controller.signal.aborted) return;
+      if (pendingGoal || ctx.hasPendingMessages()) return;
+      retryRequested = true;
+      return {entries:[...entries,{type:"custom_message" as const,...message("resumed")}],continue:true};
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+      if (retryAbort === controller && ctx.signal?.aborted && state.goal?.status === "active") {
+        state.transition("paused"); save(); expose();
+      }
+    } finally {
+      ctx.signal?.removeEventListener("abort",abort);
+      if (retryAbort === controller) retryAbort = undefined;
+    }
+  }
   function updateStatus(ctx = uiContext) {
     if (!ctx?.hasUI) return;
     const status = state.goal?.status;
@@ -33,6 +69,7 @@ export default function goalExtension(pi: ExtensionAPI) {
         if (signal?.aborted) throw new Error("Goal update cancelled.");
         if (pendingGoal) throw new Error("New goal is awaiting delivery.");
         if (state.goal?.status !== "active") throw new Error("No active goal.");
+        cancelRetry();
         state.transition(args.status === "pause" ? "paused" : "complete");
         save();
         expose();
@@ -45,6 +82,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     return { customType: MESSAGE, content: reminder(state.goal!.text, kind), display: true };
   }
   function restore(ctx: ExtensionContext) {
+    cancelRetry();
     uiContext = ctx;
     const entry = [...ctx.sessionManager.getBranch()].reverse()
       .find(e => e.type === "custom" && e.customType === ENTRY);
@@ -69,6 +107,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     if (args === "parse" || args === "pause" || args === "clear") {
       if (!state.goal) return ctx.ui.notify("No goal set.", "info");
       if (args !== "clear" && state.goal.status !== "active") return;
+      cancelRetry();
       state.transition(args === "clear" ? "closed" : "paused");
       save(); expose();
       ctx.ui.notify(args === "clear" ? "Goal cleared." : "Goal paused; the current agent turn is not interrupted.", "info");
@@ -77,6 +116,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     if (args === "resume" || args === "continue") {
       if (state.goal?.status !== "paused") return ctx.ui.notify("No paused goal.", "info");
       if (!ensureCodemode(ctx)) return;
+      cancelRetry();
       pendingGoal = randomUUID();
       state.transition("active");
       save(); expose();
@@ -86,6 +126,7 @@ export default function goalExtension(pi: ExtensionAPI) {
       return;
     }
     if (!ensureCodemode(ctx)) return;
+    cancelRetry();
     const kind = state.goal ? "changed" : "set";
     pendingGoal = randomUUID();
     state.set(args);
@@ -134,21 +175,34 @@ export default function goalExtension(pi: ExtensionAPI) {
     pendingGoal = undefined;
     expose();
   });
+  pi.on("agent_start", () => { retryRequested = false; });
+  pi.on("agent_settled", (_event,ctx) => {
+    // Some runtimes expose no abort signal at the settle boundary. If the
+    // requested retry never starts (e.g. Esc during backoff), do not leave an active goal stranded.
+    if (retryRequested && state.goal?.status === "active") {
+      cancelRetry(); state.transition("paused"); save(); expose();
+      ctx.ui.notify("Goal paused after interruption.","info");
+    }
+  });
   // Refresh elapsed time on activity, without a timer forcing terminal redraws.
   pi.on("turn_end", (_event, ctx) => updateStatus(ctx));
   pi.on("session_start", (_event, ctx) => restore(ctx));
   pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.on("session_shutdown", () => {
+    cancelRetry();
     if (state.goal?.status === "active") { state.transition("paused"); save(); }
   });
   pi.on("agent_before_settle", (event, ctx) => {
     if (state.goal?.status !== "active") return;
+    if (event.outcome === "error" && !ctx.signal?.aborted) return retryError(event.entries,ctx);
     if (event.outcome !== "completed" || ctx.signal?.aborted) {
+      cancelRetry();
       pendingGoal = undefined;
       state.transition("paused"); save(); expose();
       ctx.ui.notify(event.outcome === "error" ? "Goal paused after an error." : "Goal paused after interruption.", "info");
       return;
     }
+    retryCount = 0;
     save();
     if (pendingGoal || ctx.hasPendingMessages() || event.continue) return;
     return {

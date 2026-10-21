@@ -49,7 +49,7 @@ async function fixture(t, respond) {
 const complete = {content:[{type:'toolCall',name:'codemode',id:'complete',arguments:{code:'text(await tools.goal_update({status:"complete"}));'}}]};
 async function settled(session) {
   // Slash commands queue a turn rather than awaiting it.
-  for (let n=0;n<500;n++) {
+  for (let n=0;n<1500;n++) {
     await new Promise(r=>setTimeout(r,10));
     if (!session.isStreaming && !session.agent.state.isStreaming) return;
   }
@@ -123,12 +123,29 @@ test('new goal during a running tool is delivered after its result, before the n
   assert.equal(state().status,'complete');
 });
 
-test('provider failure pauses goal rather than looping; continue and clear commands work', async t => {
+test('persistent errors exhaust three retries and manual resume gets a fresh budget',async t=>{
+  let failing=true;
+  const h=await fixture(t,n=>failing?{error:'persistent failure'}:n===5?complete:{});
+  await h.session.prompt('/goal retry bounded');await settled(h.session);
+  const state=()=>h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data;
+  assert.equal(h.requests.length,4);assert.equal(state().status,'paused');
+  failing=false;
+  await h.session.prompt('/goal resume');await settled(h.session);
+  assert.equal(h.requests.length,6);assert.equal(state().status,'complete');
+});
+test('user abort during retry delay pauses without another model request',async t=>{
+  const h=await fixture(t,()=>({error:'failure'}));
+  await h.session.prompt('/goal abort retry');
+  while(!h.requests.length)await new Promise(r=>setTimeout(r,5));
+  await new Promise(r=>setTimeout(r,30));
+  await h.session.abort();await settled(h.session);
+  assert.equal(h.requests.length,1);
+  assert.equal(h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data.status,'paused');
+});
+test('provider failure automatically resumes goal; clear still prevents continuation', async t => {
   const h=await fixture(t,n=>n===1?{error:'test failure'}:n===2?complete:{});
   await h.session.prompt('/goal retry goal'); await settled(h.session);
   const state=()=>h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data;
-  assert.equal(state().status,'paused'); assert.equal(h.requests.length,1);
-  await h.session.prompt('/goal continue'); await settled(h.session);
   assert.match(JSON.stringify(h.requests[1].messages),/goal resumed: retry goal/);
   assert.equal(state().status,'complete'); assert.equal(h.requests.length,3);
   await h.session.prompt('/goal clear'); assert.equal(state().status,'closed');

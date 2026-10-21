@@ -49,8 +49,9 @@ test('only activation transitions add messages to model context', async()=>{
   await h.run('clear');assert.equal(notice(),'Goal cleared.');
   assert.equal(h.messages.length,count+2);
   await h.run('third');
-  h.handlers.agent_before_settle({outcome:'error'},h.ctx);
-  assert.equal(notice(),'Goal paused after an error.');
+  const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
+  assert.match(notice(),/automatically resuming in 1s/);
+  await h.run('pause');await retry;
   await h.run('continue');
   h.handlers.agent_before_settle({outcome:'aborted'},h.ctx);
   assert.equal(notice(),'Goal paused after interruption.');
@@ -129,6 +130,19 @@ test('busy agent queues replacement and rejects old completion until delivery; m
   assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
   const absent=fixture({codemode:false});await absent.run('target');
   assert.equal(absent.entries.length,0);assert.equal(absent.messages.length,0);
+});
+test('pending retry is cancelled by pause, clear, replacement, restore and shutdown',async()=>{
+  for(const action of ['pause','clear','replacement','restore','shutdown']){
+    const h=fixture();await h.run('original');
+    const result=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
+    if(action==='restore')h.handlers.session_start({},h.ctx);
+    else if(action==='shutdown')h.handlers.session_shutdown();
+    else await h.run(action);
+    assert.equal(await result,undefined,action);
+    if(action==='replacement')assert.equal(h.state().text,'replacement');
+    else if(action==='restore')assert.equal(h.tools.get('goal_update').exposure,'hidden');
+    else assert.notEqual(h.state().status,'active',action);
+  }
 });
 test('menu reports state and time, shortcuts pause/resume/clear',async()=>{
   const h=fixture();await h.run('menu goal'); h.ctx.hasUI=true;
