@@ -131,6 +131,32 @@ test('busy agent queues replacement and rejects old completion until delivery; m
   const absent=fixture({codemode:false});await absent.run('target');
   assert.equal(absent.entries.length,0);assert.equal(absent.messages.length,0);
 });
+test('ten retries double delay from 1 to 512 seconds; manual resume resets budget',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const h=fixture();await h.run('retry goal');
+  for(let attempt=1;attempt<=10;attempt++){
+    h.entries.push({type:'message',id:'error-'+attempt,message:{role:'assistant',stopReason:'error',content:[]}});
+    const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
+    assert.match(h.notices.at(-1)[0],new RegExp('in '+2**(attempt-1)+'s'));
+    assert.ok(h.notices.at(-1)[0].includes('('+attempt+'/10)'));
+    let done=false;retry.then(()=>done=true);
+    t.mock.timers.tick(1000*2**(attempt-1)-1);
+    await Promise.resolve();assert.equal(done,false);
+    t.mock.timers.tick(1);
+    const result=await retry;
+    assert.equal(result.continue,true);
+    assert.equal(result.entries.filter(e=>e.type==="custom_message").length,attempt===1?1:0,"resume reminder must not accumulate");
+    if(attempt>1)assert.deepEqual(result.entries[0],{type:"context_edit",targetId:"error-"+attempt,replacement:null});
+    h.handlers.agent_start();
+  }
+  assert.equal(await h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx),undefined);
+  assert.equal(h.state().status,'paused');
+  assert.match(h.notices.at(-1)[0],/10 failed automatic retries/);
+  await h.run('resume');
+  const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
+  assert.match(h.notices.at(-1)[0],/1s \(1\/10\)/);
+  await h.run('pause');assert.equal(await retry,undefined);
+});
 test('pending retry is cancelled by pause, clear, replacement, restore and shutdown',async()=>{
   for(const action of ['pause','clear','replacement','restore','shutdown']){
     const h=fixture();await h.run('original');

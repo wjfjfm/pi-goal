@@ -123,16 +123,6 @@ test('new goal during a running tool is delivered after its result, before the n
   assert.equal(state().status,'complete');
 });
 
-test('persistent errors exhaust three retries and manual resume gets a fresh budget',async t=>{
-  let failing=true;
-  const h=await fixture(t,n=>failing?{error:'persistent failure'}:n===5?complete:{});
-  await h.session.prompt('/goal retry bounded');await settled(h.session);
-  const state=()=>h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data;
-  assert.equal(h.requests.length,4);assert.equal(state().status,'paused');
-  failing=false;
-  await h.session.prompt('/goal resume');await settled(h.session);
-  assert.equal(h.requests.length,6);assert.equal(state().status,'complete');
-});
 test('user abort during retry delay pauses without another model request',async t=>{
   const h=await fixture(t,()=>({error:'failure'}));
   await h.session.prompt('/goal abort retry');
@@ -143,11 +133,15 @@ test('user abort during retry delay pauses without another model request',async 
   assert.equal(h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data.status,'paused');
 });
 test('provider failure automatically resumes goal; clear still prevents continuation', async t => {
-  const h=await fixture(t,n=>n===1?{error:'test failure'}:n===2?complete:{});
+  const h=await fixture(t,n=>n<=2?{error:'test failure'}:n===3?complete:{});
   await h.session.prompt('/goal retry goal'); await settled(h.session);
   const state=()=>h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data;
   assert.match(JSON.stringify(h.requests[1].messages),/goal resumed: retry goal/);
-  assert.equal(state().status,'complete'); assert.equal(h.requests.length,3);
+  assert.equal(state().status,'complete'); assert.equal(h.requests.length,4);
+  const resumes=h.sm.getBranch().filter(e=>e.type==='custom_message'&&e.customType==='pi-goal'&&String(e.content).startsWith('goal resumed:'));
+  assert.equal(resumes.length,1,'repeated retries must not append repeated resume messages');
+  assert.equal((JSON.stringify(h.requests[2].messages).match(/goal resumed: retry goal/g)||[]).length,1);
+  assert.equal(h.sm.getBranch().filter(e=>e.type==='message'&&e.message.role==='assistant'&&e.message.stopReason==='error').length,2,'failed attempts remain in raw history');
   await h.session.prompt('/goal clear'); assert.equal(state().status,'closed');
-  await h.session.prompt('/goal continue'); assert.equal(h.requests.length,3);
+  await h.session.prompt('/goal continue'); assert.equal(h.requests.length,4);
 });

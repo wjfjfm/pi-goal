@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
+import timers from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
 import { Text, matchesKey, Key } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -7,6 +7,7 @@ import { GoalState, reminder, duration } from "./state.js";
 
 const ENTRY = "pi-goal-state";
 const MESSAGE = "pi-goal";
+const MAX_RETRIES = 10;
 export default function goalExtension(pi: ExtensionAPI) {
   const state = new GoalState();
   // A replacement cannot be completed by tools from the still-running old turn.
@@ -20,9 +21,9 @@ export default function goalExtension(pi: ExtensionAPI) {
   }
   async function retryError(entries: SessionBoundaryDraft[], ctx: ExtensionContext) {
     if (retryAbort || pendingGoal || ctx.hasPendingMessages()) return;
-    if (retryCount >= 3) {
+    if (retryCount >= MAX_RETRIES) {
       state.transition("paused"); save(); expose();
-      ctx.ui.notify("Goal paused after 3 failed automatic retries. Use /goal resume to retry.","warning");
+      ctx.ui.notify(`Goal paused after ${MAX_RETRIES} failed automatic retries. Use /goal resume to retry.`,"warning");
       return;
     }
     const attempt = ++retryCount;
@@ -30,13 +31,19 @@ export default function goalExtension(pi: ExtensionAPI) {
     retryAbort = controller;
     const abort = () => controller.abort();
     ctx.signal?.addEventListener("abort",abort,{once:true});
-    ctx.ui.notify(`Goal error; automatically resuming in ${2 ** (attempt-1)}s (${attempt}/3).`,"warning");
+    ctx.ui.notify(`Goal error; automatically resuming in ${2 ** (attempt-1)}s (${attempt}/${MAX_RETRIES}).`,"warning");
     try {
-      await delay(1000 * 2 ** (attempt-1),undefined,{signal:controller.signal});
+      await timers.setTimeout(1000 * 2 ** (attempt-1),undefined,{signal:controller.signal});
       if (state.goal?.status !== "active" || controller.signal.aborted) return;
       if (pendingGoal || ctx.hasPendingMessages()) return;
       retryRequested = true;
-      return {entries:[...entries,{type:"custom_message" as const,...message("resumed")}],continue:true};
+      // Keep one resume prompt. Later retries omit only the failed assistant
+      // response from future context, so the runtime can retry the same prompt.
+      // Raw history, UI and usage accounting remain intact.
+      if (attempt === 1) return {entries:[...entries,{type:"custom_message" as const,...message("resumed")}],continue:true};
+      const last = [...ctx.sessionManager.getBranch()].reverse().find(entry => entry.type === "message" && entry.message.role !== "system");
+      if (last?.type !== "message" || last.message.role !== "assistant" || last.message.stopReason !== "error") return;
+      return {entries:[...entries,{type:"context_edit" as const,targetId:last.id,replacement:null}],continue:true};
     } catch (error) {
       if (!controller.signal.aborted) throw error;
       if (retryAbort === controller && ctx.signal?.aborted && state.goal?.status === "active") {
