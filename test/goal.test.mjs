@@ -24,11 +24,11 @@ test('time excludes pauses and offline time; restore validates persisted data', 
 });
 
 const model = {id:'goal-test',name:'goal-test',api:'openai-completions',provider:'goal-test',baseUrl:'http://unused.invalid',reasoning:false,input:['text'],contextWindow:100000,maxTokens:1000,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}};
-async function fixture(t, respond) {
+async function fixture(t, respond, extensions = []) {
   const cwd = await mkdtemp(join(tmpdir(), 'pi-goal-test-'));
   const settingsManager = SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false}});
   let api;
-  const loader = new DefaultResourceLoader({cwd,agentDir:join(cwd,'agent'),settingsManager,noExtensions:true,noSkills:true,noContextFiles:true,extensionFactories:[createCodemodeExtension({models:false}),extension,pi => {api=pi;pi.registerProvider('goal-test',{apiKey:'dummy',api:model.api,baseUrl:model.baseUrl,models:[model]});}]});
+  const loader = new DefaultResourceLoader({cwd,agentDir:join(cwd,'agent'),settingsManager,noExtensions:true,noSkills:true,noContextFiles:true,extensionFactories:[createCodemodeExtension({models:false}),...extensions,extension,pi => {api=pi;pi.registerProvider('goal-test',{apiKey:'dummy',api:model.api,baseUrl:model.baseUrl,models:[model]});}]});
   await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
   const sm = SessionManager.inMemory(cwd);
   const { session } = await createAgentSession({cwd,agentDir:join(cwd,'agent'),settingsManager,resourceLoader:loader,sessionManager:sm,model});
@@ -132,6 +132,20 @@ test('user abort during retry delay pauses without another model request',async 
   assert.equal(h.requests.length,1);
   assert.equal(h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data.status,'paused');
 });
+test('goal composes with another extension requesting continuation after an error', async t => {
+  const h=await fixture(t,n=>n===1?{error:'handled elsewhere'}:n===2?complete:{},[
+    pi=>pi.on('agent_before_settle',event=>event.outcome==='error' ? {
+      entries:[...event.entries,{type:'custom_message',customType:'other-retry',content:'Continue from the other extension',display:true}],
+      continue:true,
+    } : undefined),
+  ]);
+  await h.session.prompt('/goal shared boundary');await settled(h.session);
+  assert.equal(h.requests.length,3);
+  assert.match(JSON.stringify(h.requests[1].messages),/Continue from the other extension/);
+  assert.doesNotMatch(JSON.stringify(h.requests[1].messages),/goal resumed:/);
+  assert.equal(h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data.status,'complete');
+});
+
 test('provider failure automatically resumes goal; clear still prevents continuation', async t => {
   const h=await fixture(t,n=>n<=2?{error:'test failure'}:n===3?complete:{});
   await h.session.prompt('/goal retry goal'); await settled(h.session);

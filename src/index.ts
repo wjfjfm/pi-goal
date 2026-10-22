@@ -36,13 +36,16 @@ export default function goalExtension(pi: ExtensionAPI) {
       await timers.setTimeout(1000 * 2 ** (attempt-1),undefined,{signal:controller.signal});
       if (state.goal?.status !== "active" || controller.signal.aborted) return;
       if (pendingGoal || ctx.hasPendingMessages()) return;
-      retryRequested = true;
       // Keep one resume prompt. Later retries omit only the failed assistant
       // response from future context, so the runtime can retry the same prompt.
       // Raw history, UI and usage accounting remain intact.
-      if (attempt === 1) return {entries:[...entries,{type:"custom_message" as const,...message("resumed")}],continue:true};
+      if (attempt === 1) {
+        retryRequested = true;
+        return {entries:[...entries,{type:"custom_message" as const,...message("resumed")}],continue:true};
+      }
       const last = [...ctx.sessionManager.getBranch()].reverse().find(entry => entry.type === "message" && entry.message.role !== "system");
       if (last?.type !== "message" || last.message.role !== "assistant" || last.message.stopReason !== "error") return;
+      retryRequested = true;
       return {entries:[...entries,{type:"context_edit" as const,targetId:last.id,replacement:null}],continue:true};
     } catch (error) {
       if (!controller.signal.aborted) throw error;
@@ -114,31 +117,22 @@ export default function goalExtension(pi: ExtensionAPI) {
     if (args === "parse" || args === "pause" || args === "clear") {
       if (!state.goal) return ctx.ui.notify("No goal set.", "info");
       if (args !== "clear" && state.goal.status !== "active") return;
-      cancelRetry();
+      cancelRetry(); pendingGoal = undefined;
       state.transition(args === "clear" ? "closed" : "paused");
       save(); expose();
       ctx.ui.notify(args === "clear" ? "Goal cleared." : "Goal paused; the current agent turn is not interrupted.", "info");
       return;
     }
-    if (args === "resume" || args === "continue") {
-      if (state.goal?.status !== "paused") return ctx.ui.notify("No paused goal.", "info");
-      if (!ensureCodemode(ctx)) return;
-      cancelRetry();
-      pendingGoal = randomUUID();
-      state.transition("active");
-      save(); expose();
-      ctx.ui.notify("Goal active.", "info");
-      pi.sendMessage({ ...message("resumed"), details: { goalDelivery: pendingGoal } },
-        { triggerTurn: true, deliverAs: "steer" });
-      return;
-    }
+    const resuming = args === "resume" || args === "continue";
+    if (resuming && state.goal?.status !== "paused") return ctx.ui.notify("No paused goal.", "info");
     if (!ensureCodemode(ctx)) return;
     cancelRetry();
-    const kind = state.goal ? "changed" : "set";
+    const kind = resuming ? "resumed" : state.goal && state.goal.status !== "closed" ? "changed" : "set";
     pendingGoal = randomUUID();
-    state.set(args);
+    if (resuming) state.transition("active");
+    else state.set(args);
     save(); expose();
-    ctx.ui.notify(kind === "set" ? "Goal set: active." : "Goal changed: active.", "info");
+    ctx.ui.notify(resuming ? "Goal active." : kind === "set" ? "Goal set: active." : "Goal changed: active.", "info");
     pi.sendMessage({ ...message(kind), details: { goalDelivery: pendingGoal } },
       { triggerTurn: true, deliverAs: "steer" });
   }
@@ -147,10 +141,11 @@ export default function goalExtension(pi: ExtensionAPI) {
     async handler(args, ctx) {
       args = args.trim();
       if (args) return action(args, ctx);
-      if (!ctx.hasUI) {
+      if (ctx.mode !== "tui") {
         ctx.ui.notify(state.goal ? `${state.goal.status}: ${state.goal.text} (${duration(state.elapsed())})` : "No goal set.", "info");
         return;
       }
+      const displayedGoal = state.goal;
       const selected = await ctx.ui.custom<string | undefined>((tui, _theme, _keys, done) => {
         const view = new Text("", 1, 1);
         const timer = setInterval(() => { view.invalidate(); tui.requestRender(); }, 1000);
@@ -171,7 +166,7 @@ export default function goalExtension(pi: ExtensionAPI) {
           dispose() { clearInterval(timer); },
         };
       });
-      if (selected) await action(selected, ctx);
+      if (selected && state.goal === displayedGoal) await action(selected, ctx);
     },
   });
   expose();
@@ -201,7 +196,10 @@ export default function goalExtension(pi: ExtensionAPI) {
   });
   pi.on("agent_before_settle", (event, ctx) => {
     if (state.goal?.status !== "active") return;
-    if (event.outcome === "error" && !ctx.signal?.aborted) return retryError(event.entries,ctx);
+    if (event.outcome === "error" && !ctx.signal?.aborted) {
+      if (!event.continue) return retryError(event.entries,ctx);
+      return;
+    }
     if (event.outcome !== "completed" || ctx.signal?.aborted) {
       cancelRetry();
       pendingGoal = undefined;

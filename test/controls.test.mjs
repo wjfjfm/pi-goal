@@ -11,7 +11,7 @@ function fixture({codemode=true}={}) {
     getAllTools:()=>[...(codemode?[{name:'codemode'}]:[]),...tools.values()],
     getActiveTools:()=>active,setActiveTools:a=>active=a,
   };
-  const ctx={hasUI:false,isIdle:()=>idle,hasPendingMessages:()=>pending,sessionManager:{getBranch:()=>entries},ui:{notify:(...args)=>notices.push(args),setStatus:(...args)=>statuses.push(args)}};
+  const ctx={mode:'tui',hasUI:false,isIdle:()=>idle,hasPendingMessages:()=>pending,sessionManager:{getBranch:()=>entries},ui:{notify:(...args)=>notices.push(args),setStatus:(...args)=>statuses.push(args)}};
   extension(pi);
   return {handlers,tools,entries,messages,notices,statuses,ctx,run:arg=>command(arg,ctx),idle:v=>idle=v,pending:v=>pending=v,active:()=>active,state:()=>entries.at(-1)?.data};
 }
@@ -170,6 +170,51 @@ test('pending retry is cancelled by pause, clear, replacement, restore and shutd
     else assert.notEqual(h.state().status,'active',action);
   }
 });
+test('existing error continuation does not wait or consume the goal retry budget',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const h=fixture();await h.run('target');
+  const notices=h.notices.length;
+  for(let n=0;n<12;n++) {
+    assert.equal(await h.handlers.agent_before_settle({outcome:'error',entries:[],continue:true},h.ctx),undefined);
+  }
+  assert.equal(h.notices.length,notices);
+  assert.equal(h.state().status,'active');
+  const retry=h.handlers.agent_before_settle({outcome:'error',entries:[],continue:false},h.ctx);
+  assert.match(h.notices.at(-1)[0],/1s \(1\/10\)/);
+  t.mock.timers.tick(1000);
+  assert.equal((await retry).continue,true);
+});
+
+test('RPC status uses notification rather than a terminal-only component',async()=>{
+  const h=fixture();await h.run('rpc goal');
+  h.ctx.mode='rpc';h.ctx.hasUI=true;
+  h.ctx.ui.custom=()=>assert.fail('RPC cannot render a custom TUI');
+  const count=h.messages.length;
+  await h.run('');
+  assert.match(h.notices.at(-1)[0],/active: rpc goal/);
+  assert.equal(h.messages.length,count);
+});
+
+test('stale menu action cannot change a replaced or restored goal',async()=>{
+  for(const change of ['replacement','restore']) {
+    const h=fixture();await h.run('original');h.ctx.hasUI=true;
+    let finish;
+    h.ctx.ui.custom=()=>new Promise(resolve=>{finish=resolve;});
+    const menu=h.run('');
+    if(change==='replacement')await h.run('replacement');
+    else h.handlers.session_tree({},h.ctx);
+    const before=h.entries.length;
+    finish('clear');await menu;
+    assert.equal(h.entries.length,before,change);
+    assert.notEqual(h.state().status,'closed');
+  }
+});
+
+test('setting a goal after clear starts a new goal rather than changing the closed one',async()=>{
+  const h=fixture();await h.run('old');await h.run('clear');await h.run('new');
+  assert.match(h.messages.at(-1).content,/^goal set: new/);
+});
+
 test('menu reports state and time, shortcuts pause/resume/clear',async()=>{
   const h=fixture();await h.run('menu goal'); h.ctx.hasUI=true;
   for (const [key,status] of [['p','paused'],['r','active'],['x','closed']]) {
