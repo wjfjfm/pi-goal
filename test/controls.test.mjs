@@ -29,7 +29,7 @@ test('parentId supports assistant/user children, ordered queries and indented di
   assert.equal(list.goals[1].parentId,id);
   assert.equal(list.goals[2].parentId,child.id);
   assert.equal(list.goals[2].setBy,'user');
-  assert.equal(list.run.turnsRemaining,20);assert.deepEqual(list.run.ids,[id]);
+  assert.equal('turnsRemaining' in list.run,false);assert.deepEqual(list.run.ids,[id]);
   await h.run('show');
   assert.ok(h.notices.at(-1)[0].includes('    [todo] '+list.goals[2].id));
   assert.equal(h.entries.length,before);
@@ -91,21 +91,68 @@ test('user edit delivery bars stale writes; cancelled tasks cannot be revived',a
   await call(h,'goal_update',{id,status:'doing'});
   assert.notEqual(h.state().run.status,'active');
 });
-test('one run budget survives additions and updates; only user resume renews',async()=>{
-  const h=fixture();h.idle(false);await h.run('first');
-  h.handlers.turn_end({entries:[]},h.ctx);assert.equal(h.state().run.turnsRemaining,20);
-  h.handlers.message_start({message:{role:'custom',...h.messages.at(-1)}});
-  for(let i=0;i<19;i++)h.handlers.turn_end({entries:[]},h.ctx);
-  await call(h,'goal_add',{text:'second'});
+test('ten consecutive rapid intervals pause; CRUD and summaries do not reset detection',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:0});
+  const h=fixture();await h.run('first');
+  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true); // Baseline, not an interval.
+  for(let i=1;i<=9;i++){
+    t.mock.timers.tick(9999);
+    assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
+  }
+  await call(h,'goal_add',{text:'later'});
   await call(h,'goal_update',{id:h.state().goals[0].id,status:'doing'});
-  assert.equal(h.state().run.turnsRemaining,1);assert.equal(h.state().run.ids.length,1);
+  await show(h);await h.run('resume'); // Already active: no reset.
+  h.handlers.session_compact({},h.ctx);
+  h.handlers.tool_result({toolName:'backtrack',isError:false});
   h.handlers.turn_end({entries:[]},h.ctx);
-  assert.equal(h.state().run.status,'paused');assert.equal(h.state().run.turnsRemaining,0);
-  await call(h,'goal_add',{text:'third'});
-  assert.equal(h.state().run.turnsRemaining,0);
+  t.mock.timers.tick(9999);
   assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
-  await h.run('resume');assert.equal(h.state().run.turnsRemaining,20);
-  assert.equal(h.state().run.ids.length,3);
+  assert.equal(h.state().run.status,'paused');
+  assert.match(h.notices.at(-1)[0],/possible loop/);
+  assert.equal('turnsRemaining' in h.state().run,false);
+  await h.run('resume');
+  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
+  assert.equal(h.state().run.ids.length,2);
+});
+test('clock rollback and error boundaries restart timing rather than adding rapid intervals',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:10000});
+  const h=fixture();await h.run('work');
+  for(let i=0;i<10;i++)assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
+  t.mock.timers.setTime(0);
+  for(let i=0;i<10;i++)assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
+  assert.equal(h.handlers.agent_before_settle({outcome:'error',entries:[],continue:true},h.ctx),undefined);
+  for(let i=0;i<10;i++)assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
+  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
+  assert.equal(h.state().run.status,'paused');
+});
+test('10 seconds or more clears rapid streak; normal execution has no total turn limit',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:0});
+  const h=fixture();await h.run('work');
+  for(let cycle=0;cycle<5;cycle++){
+    for(let i=0;i<10;i++){
+      assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
+      t.mock.timers.tick(i===9?10000:1);
+    }
+  }
+  for(let i=0;i<100;i++)h.handlers.turn_end({entries:[]},h.ctx);
+  assert.equal(h.state().run.status,'active');
+  assert.equal('turnsRemaining' in (await show(h)).run,false);
+});
+test('pending and external continuations do not count; restore and resume reset timing',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:0});
+  const h=fixture();h.idle(false);await h.run('work');
+  for(let i=0;i<15;i++)assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
+  h.handlers.message_start({message:{role:'custom',...h.messages.at(-1)}});
+  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
+  for(let i=0;i<15;i++){
+    h.pending(true);assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
+    h.pending(false);assert.equal(h.handlers.agent_before_settle({...boundary,continue:true},h.ctx),undefined);
+  }
+  for(let i=0;i<9;i++)assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
+  h.handlers.session_start({},h.ctx);
+  await h.run('resume');h.handlers.message_start({message:{role:'custom',...h.messages.at(-1)}});
+  for(let i=0;i<10;i++)assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
+  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
 });
 test('new and reworded tasks are not implicitly authorized; blocked/done reconcile run',async()=>{
   const h=fixture();await h.run('first');
@@ -173,7 +220,7 @@ test('retry cancellation on pause, edits, clear, restore and shutdown',async()=>
     assert.equal(await retry,undefined);
   }
 });
-test('compact and successful backtrack inject one small digest without execution or budget reset',async()=>{
+test('compact and successful backtrack inject one small digest without starting execution',async()=>{
   const h=fixture();await h.run('add task');
   const before=h.entries.length;
   h.handlers.session_compact({},h.ctx);

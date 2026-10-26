@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-export const TURN_BUDGET = 20;
 export const statuses = ["todo", "doing", "blocked", "done", "cancelled"] as const;
 export type Status = typeof statuses[number];
 export type Actor = "user" | "assistant";
@@ -10,7 +9,7 @@ export interface Goal {
 }
 export interface Run {
   status: "active" | "paused" | "complete";
-  ids: string[]; elapsedMs: number; turnsRemaining: number; resumedAt?: number;
+  ids: string[]; elapsedMs: number; resumedAt?: number;
 }
 export interface Snapshot { version: 2; goals: Goal[]; run: Run | null }
 const timestamp = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 8.64e15;
@@ -81,18 +80,13 @@ export class GoalState {
   start() {
     const ids = this.visible().filter(g=>g.status === "todo" || g.status === "doing").map(g=>g.id);
     if (!ids.length) throw new Error("No todo/doing goals. Unblock a goal before resuming.");
-    this.run = {status:"active",ids,elapsedMs:this.elapsed(),turnsRemaining:TURN_BUDGET,resumedAt:this.now()};
+    this.run = {status:"active",ids,elapsedMs:this.elapsed(),resumedAt:this.now()};
     this.since = this.now();
   }
   transition(status: Run["status"]) {
     if (!this.run) return;
     this.run = {...this.run,status,elapsedMs:this.elapsed()};
     this.since = status === "active" ? this.now() : undefined;
-  }
-  consumeTurn() {
-    if (this.run?.status !== "active") return false;
-    this.run = {...this.run,turnsRemaining:Math.max(0,this.run.turnsRemaining-1)};
-    return this.run.turnsRemaining === 0;
   }
   reconcile() {
     if (this.run?.status !== "active" || this.runnable().length) return false;
@@ -110,7 +104,7 @@ export class GoalState {
       const g: Goal = {id:"legacy",text:v.text,status:v.status === "complete" ? "done" : v.status === "closed" ? "cancelled" : "todo",
         ...(v.agentTurnsRemaining !== undefined ? {setBy:"assistant" as const} : {}),...(timestamp(v.setAt) ? {setAt:v.setAt} : {})};
       this.goals = [g];
-      this.run = {status:v.status === "complete" ? "complete" : "paused",ids:[g.id],elapsedMs:v.elapsedMs,turnsRemaining:0,...(timestamp(v.resumedAt) ? {resumedAt:v.resumedAt} : {})};
+      this.run = {status:v.status === "complete" ? "complete" : "paused",ids:[g.id],elapsedMs:v.elapsedMs,...(timestamp(v.resumedAt) ? {resumedAt:v.resumedAt} : {})};
       return;
     }
     if (!Array.isArray(v.goals)) return;
@@ -139,7 +133,6 @@ export class GoalState {
     const r = v.run as Run | null;
     if (!r || !["active","paused","complete"].includes(r.status) || !Array.isArray(r.ids) || !Number.isFinite(r.elapsedMs) || r.elapsedMs < 0) return;
     this.run = {status:r.status === "active" ? "paused" : r.status,ids:r.ids.filter(id=>seen.has(id)),elapsedMs:r.elapsedMs,
-      turnsRemaining:Number.isInteger(r.turnsRemaining) && r.turnsRemaining >= 0 && r.turnsRemaining <= TURN_BUDGET ? r.turnsRemaining : 0,
       ...(timestamp(r.resumedAt) ? {resumedAt:r.resumedAt} : {})};
   }
 }

@@ -73,11 +73,18 @@ test('real goal run repeats then completes using ID; user author is retained',as
   assert.equal(state(h).goals[0].updatedBy,'assistant');
   assert.match(JSON.stringify(h.requests[1].messages),/Goals still active/);
 });
-test('real run stops at 20 turns without resetting through reminders',async t=>{
-  const h=await fixture(t,()=>({}),[],25);
-  await h.session.prompt('/goal bounded task');await settled(h.session);
-  assert.equal(h.requests.length,20);
-  assert.equal(state(h).run.status,'paused');assert.equal(state(h).run.turnsRemaining,0);
+test('real run pauses after ten rapid auto-continue intervals',async t=>{
+  const h=await fixture(t,()=>({}),[],15);
+  await h.session.prompt('/goal looping task');await settled(h.session);
+  assert.equal(h.requests.length,11);
+  assert.equal(state(h).run.status,'paused');
+  assert.equal('turnsRemaining' in state(h).run,false);
+});
+test('real tool-driven execution can exceed twenty model turns',async t=>{
+  const h=await fixture(t,n=>n<=25?code('text(await tools.goal_show({}));'):n===26?finish:{},[],35);
+  await h.session.prompt('/goal long task');await settled(h.session);
+  assert.equal(h.requests.length,27);
+  assert.equal(state(h).run.status,'complete');
 });
 test('blocked list pauses; editing to todo does not resume until user requests',async t=>{
   const h=await fixture(t,n=>n===1?code('const s=JSON.parse(await tools.goal_show({})); text(await tools.goal_update({id:s.goals[0].id,status:"blocked"}));'):n===3?finish:{});

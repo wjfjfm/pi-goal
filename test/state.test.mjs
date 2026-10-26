@@ -2,14 +2,14 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {GoalState} from '../dist/state.js';
-test('nested goals preserve hierarchy, independent statuses and execution budget',()=>{
+test('nested goals preserve hierarchy, independent statuses and execution scope',()=>{
   const s=new GoalState();
-  const root=s.add('root','user');s.start();s.consumeTurn();
+  const root=s.add('root','user');s.start();
   const child=s.add('child','assistant',root.id);
   const other=s.add('other root','user');
   const grandchild=s.add('grandchild','user',child.id);
   assert.deepEqual(s.outline().map(r=>[r.goal.id,r.depth]),[[root.id,0],[child.id,1],[grandchild.id,2],[other.id,0]]);
-  assert.equal(s.run.turnsRemaining,19);assert.deepEqual(s.run.ids,[root.id]);
+  assert.equal('turnsRemaining' in s.run,false);assert.deepEqual(s.run.ids,[root.id]);
   assert.throws(()=>s.delete(root.id,'user'),/child goals/);
   s.update(child.id,{status:'done'},'assistant');
   assert.equal(s.get(root.id).status,'todo');assert.equal(s.get(grandchild.id).status,'todo');
@@ -48,13 +48,13 @@ test('source, timestamps and tombstones persist; snapshots are detached',()=>{
   assert.equal(s.visible().length,0);assert.equal(s.get(g.id).deletedAt,300);
   snap.goals[0].text='bad';assert.equal(s.get(g.id).text,'edited');
 });
-test('elapsed time excludes pause and offline intervals; restore pauses with remaining budget',()=>{
+test('elapsed time excludes pause and offline intervals; restore pauses without an obsolete turn budget',()=>{
   let now=0;const s=new GoalState(()=>now);
-  s.add('work','assistant');s.start();now=1000;s.consumeTurn();s.transition('paused');
-  now=5000;assert.equal(s.elapsed(),1000);s.start();now=6000;s.consumeTurn();
+  s.add('work','assistant');s.start();now=1000;s.transition('paused');
+  now=5000;assert.equal(s.elapsed(),1000);s.start();now=6000;
   const snap=s.snapshot();assert.equal(snap.run.elapsedMs,2000);
   now=100000;s.restore(snap);assert.equal(s.run.status,'paused');
-  assert.equal(s.elapsed(),2000);assert.equal(s.run.turnsRemaining,19);
+  assert.equal(s.elapsed(),2000);assert.equal('turnsRemaining' in s.run,false);
 });
 test('legacy migration preserves known assistant source without inventing unknown provenance',()=>{
   const s=new GoalState();
@@ -67,10 +67,10 @@ test('legacy migration preserves known assistant source without inventing unknow
   assert.equal(s.goals[0].status,'cancelled');
   s.restore({text:'bad',status:'active',elapsedMs:-1});assert.equal(s.goals.length,0);
 });
-test('malformed snapshots are filtered; invalid budget fails closed',()=>{
+test('malformed snapshots are filtered; obsolete budget is discarded',()=>{
   const s=new GoalState();
   s.restore({version:2,goals:[null,{id:'x',text:'ok',status:'todo',setBy:'fake',setAt:Infinity},{id:'x',text:'duplicate',status:'done'}],run:{status:'active',ids:['x','missing'],elapsedMs:20,turnsRemaining:999}});
   assert.equal(s.goals.length,1);assert.equal(s.goals[0].setBy,undefined);
-  assert.equal(s.goals[0].setAt,undefined);assert.equal(s.run.turnsRemaining,0);
+  assert.equal(s.goals[0].setAt,undefined);assert.equal('turnsRemaining' in s.run,false);
   assert.deepEqual(s.run.ids,['x']);assert.equal(s.run.status,'paused');
 });
