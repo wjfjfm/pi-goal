@@ -36,7 +36,7 @@ export class GoalState {
   }
 }
 export function reminder(text: string, kind: "set" | "changed" | "resumed" | "still active") {
-  return `goal ${kind}: ${text}\n\nUse codemode tools.goal_update({status:"show"}) to inspect the goal, or tools.goal_update({status:"complete"|"pause"}) when done or blocked.`;
+  return `goal ${kind}: ${text}\n\nUse codemode tools.goal_show({}) to inspect the goal, or tools.goal_update({status:"complete"|"pause"}) when done or blocked.`;
 }
 export function duration(ms: number) {
   const s = Math.floor(ms / 1000);

@@ -17,7 +17,7 @@ function fixture({codemode=true}={}) {
 }
 test('show returns a read-only snapshot without delivery or lifecycle side effects',async()=>{
   const h=fixture();
-  const show=()=>h.tools.get('goal_update').execute('show',{status:'show'});
+  const show=()=>h.tools.get('goal_show').execute('show',{});
   assert.equal((await show()).details.goal,null);
   await h.run('target');
   for(const change of ['active','pause','resume','complete','clear','replacement']) {
@@ -26,6 +26,8 @@ test('show returns a read-only snapshot without delivery or lifecycle side effec
     else if(change!=='active')await h.run(change);
     const counts=[h.entries.length,h.messages.length,h.notices.length,h.statuses.length];
     const tool=h.tools.get('goal_update');
+    assert.equal(h.tools.get('goal_show').exposure,'codemode');
+    assert.ok(!JSON.stringify(tool.parameters).includes('"show"'),'show is not a goal status');
     const result=await show();
     assert.equal(result.details.goal.text,h.state().text);
     assert.equal(result.details.goal.status,h.state().status);
@@ -45,7 +47,7 @@ test('show does not cancel an automatic retry',async t=>{
   t.mock.timers.enable({apis:['setTimeout']});
   const h=fixture();await h.run('target');
   const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
-  await h.tools.get('goal_update').execute('show',{status:'show'});
+  await h.tools.get('goal_show').execute('show',{});
   t.mock.timers.tick(1000);
   assert.equal((await retry).continue,true);
 });

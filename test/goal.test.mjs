@@ -63,6 +63,8 @@ async function fixture(t, respond, extensions = []) {
   const requests=[];
   session.agent.streamFunction = (_model, context) => {
     requests.push(context);
+    assert.ok(!getCurrentTools(context.messages).some(tool => ["goal_show","goal_update"].includes(tool.name)),
+      "goal tools must only be exposed through codemode, never as standalone model tools");
     assert.ok(requests.length < 10, 'runaway goal loop');
     const response = respond(requests.length, context, api);
     const message={role:'assistant',content:response.content ?? [{type:'text',text:'done'}],api:model.api,provider:model.provider,model:model.id,usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason:response.error?'error':response.content?'toolUse':'stop',timestamp:Date.now(),...(response.error?{errorMessage:response.error}:{})};
@@ -101,7 +103,7 @@ test('disabled goal is invisible; active goal uses real codemode and repeats unt
 
 test('agent can show the active goal through real codemode without completing it', async t => {
   const h = await fixture(t,(n,context)=>{
-    if(n===1)return {content:[{type:'toolCall',name:'codemode',id:'show',arguments:{code:'text(await tools.goal_update({status:"show"}));'}}]};
+    if(n===1)return {content:[{type:'toolCall',name:'codemode',id:'show',arguments:{code:'text(await tools.goal_show({}));'}}]};
     if(n===2){
       const result=context.messages.find(m=>m.role==='toolResult'&&m.toolCallId==='show');
       assert.ok(result);
@@ -118,6 +120,28 @@ test('agent can show the active goal through real codemode without completing it
   await h.session.prompt('/goal inspect goal');await settled(h.session);
   assert.equal(h.requests.length,3);
   assert.equal(h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data.status,'complete');
+});
+
+test('goal_show stays callable through codemode after pause or completion',async t=>{
+  for(const status of ['pause','complete'])await t.test(status,async t=>{
+    const h=await fixture(t,(n,context)=>{
+      if(n===1)return {content:[{type:'toolCall',name:'codemode',id:'update',arguments:{code:`text(await tools.goal_update({status:"${status}"}));`}}]};
+      if(n===3)return {content:[{type:'toolCall',name:'codemode',id:'show',arguments:{code:'text(await tools.goal_show({}));'}}]};
+      if(n===4){
+        const result=context.messages.find(m=>m.role==='toolResult'&&m.toolCallId==='show');
+        assert.ok(result);assert.notEqual(result.isError,true);
+        assert.match(JSON.stringify(result.content),new RegExp('Status: '+(status==='pause'?'paused':'complete')));
+      }
+      return {};
+    });
+    await h.session.prompt('/goal inspect inactive');await settled(h.session);
+    assert.equal(h.api.getAllTools().find(t=>t.name==='goal_update').exposure,'hidden');
+    assert.equal(h.api.getAllTools().find(t=>t.name==='goal_show').exposure,'codemode');
+    const before=h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').length;
+    await h.session.prompt('show current goal');await settled(h.session);
+    assert.equal(h.requests.length,4);
+    assert.equal(h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').length,before);
+  });
 });
 
 test('agent can pause through real codemode and user can resume', async t => {
