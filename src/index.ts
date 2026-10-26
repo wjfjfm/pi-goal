@@ -1,263 +1,153 @@
 import { randomUUID } from "node:crypto";
 import timers from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
-import { Text, matchesKey, Key } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { GoalState, reminder, duration } from "./state.js";
+import { GoalState, duration, statuses, type Status } from "./state.js";
 
-const ENTRY = "pi-goal-state";
-const MESSAGE = "pi-goal";
-const MAX_RETRIES = 10;
+const ENTRY = "pi-goal-state", MESSAGE = "pi-goal", MAX_RETRIES = 10;
 export default function goalExtension(pi: ExtensionAPI) {
   const state = new GoalState();
-  // A replacement cannot be completed by tools from the still-running old turn.
-  let pendingGoal: string | undefined;
-  let uiContext: ExtensionContext | undefined;
-  let retryCount = 0;
-  let retryRequested = false;
+  let pendingGoal: string | undefined, uiContext: ExtensionContext | undefined;
+  let retryCount = 0, retryRequested = false, afterBacktrack = false;
   let retryAbort: AbortController | undefined;
-  function cancelRetry() {
-    retryAbort?.abort(); retryAbort = undefined; retryCount = 0; retryRequested = false;
+  function cancelRetry() { retryAbort?.abort(); retryAbort=undefined; retryCount=0; retryRequested=false; }
+  function summary() {
+    const r=state.snapshot().run;
+    return `${state.visible().map(g=>`[${g.status}] ${g.id} ${g.text} (set by ${g.setBy ?? "unknown (legacy)"})`).join("\n") || "No goals."}\nRun: ${r?.status ?? "idle"}; running time: ${duration(state.elapsed())}${r ? `; turns remaining: ${r.turnsRemaining}\nAuthorized IDs: ${r.ids.join(", ")}` : ""}`;
   }
-  async function retryError(entries: SessionBoundaryDraft[], ctx: ExtensionContext) {
-    if (retryAbort || pendingGoal || ctx.hasPendingMessages()) return;
-    if (retryCount >= MAX_RETRIES) {
-      state.transition("paused"); save(); expose();
-      ctx.ui.notify(`Goal paused after ${MAX_RETRIES} failed automatic retries. Use /goal resume to retry.`,"warning");
-      return;
-    }
-    const attempt = ++retryCount;
-    const controller = new AbortController();
-    retryAbort = controller;
-    const abort = () => controller.abort();
-    ctx.signal?.addEventListener("abort",abort,{once:true});
-    ctx.ui.notify(`Goal error; automatically resuming in ${2 ** (attempt-1)}s (${attempt}/${MAX_RETRIES}).`,"warning");
-    try {
-      await timers.setTimeout(1000 * 2 ** (attempt-1),undefined,{signal:controller.signal});
-      if (state.goal?.status !== "active" || controller.signal.aborted) return;
-      if (pendingGoal || ctx.hasPendingMessages()) return;
-      // Keep one resume prompt. Later retries omit only the failed assistant
-      // response from future context, so the runtime can retry the same prompt.
-      // Raw history, UI and usage accounting remain intact.
-      if (attempt === 1) {
-        retryRequested = true;
-        return {entries:[...entries,{type:"custom_message" as const,...message("resumed")}],continue:true};
-      }
-      const last = [...ctx.sessionManager.getBranch()].reverse().find(entry => entry.type === "message" && entry.message.role !== "system");
-      if (last?.type !== "message" || last.message.role !== "assistant" || last.message.stopReason !== "error") return;
-      retryRequested = true;
-      return {entries:[...entries,{type:"context_edit" as const,targetId:last.id,replacement:null}],continue:true};
-    } catch (error) {
-      if (!controller.signal.aborted) throw error;
-      if (retryAbort === controller && ctx.signal?.aborted && state.goal?.status === "active") {
-        state.transition("paused"); save(); expose();
-      }
-    } finally {
-      ctx.signal?.removeEventListener("abort",abort);
-      if (retryAbort === controller) retryAbort = undefined;
-    }
+  function updateStatus(ctx=uiContext) {
+    if (ctx?.hasUI) ctx.ui.setStatus(MESSAGE,state.goals.length ? `Goals: ${state.visible().length} · ${state.run?.status ?? "idle"} (${duration(state.elapsed())})` : undefined);
   }
-  function updateStatus(ctx = uiContext) {
-    if (!ctx?.hasUI) return;
-    const status = state.goal?.status;
-    const text = status === "active" ? `Pursuing goal (${duration(state.elapsed())})`
-      : status === "paused" ? "Goal paused (/goal resume)"
-      : status === "complete" ? `Goal achieved (${duration(state.elapsed())})` : undefined;
-    ctx.ui.setStatus("pi-goal", text);
+  function save() { pi.appendEntry(ENTRY,state.snapshot()); updateStatus(); }
+  function message(kind: string) {
+    return {customType:MESSAGE,content:`Goals ${kind}:\n${summary()}\n\nUse codemode tools.goal_show({}), goal_add({text}), goal_update({id,text?,status?}), goal_delete({id}). Status: todo/doing/blocked/done/cancelled. Work only on authorized IDs while the run is active. New or reworded items require user /goal resume to enter execution scope. Listing or doing is not permission. Do not expand scope, bypass confirmations, or recreate cancelled tasks. Mark blocked when awaiting user input.`,display:true};
   }
-  function save() {
-    pi.appendEntry(ENTRY, state.snapshot());
-    updateStatus();
+  function digest() {
+    const goals=state.visible(), count=(s: Status)=>goals.filter(g=>g.status===s).length;
+    return {customType:MESSAGE,content:`[goal status: ${count("todo")} todo, ${count("doing")} doing, ${count("blocked")} blocked, ${count("done")} done, ${count("cancelled")} cancelled; run: ${state.run?.status ?? "idle"}; use codemode tools.goal_show({}) for details]`,display:true};
   }
-  pi.registerTool({
-    name: "goal_show", label: "Show goal",
-    description: "Show the current goal, status, set time, latest resume time (if any) and elapsed running time without changing it.",
-    exposure: "codemode",
-    annotations: { readOnlyHint: true },
-    parameters: Type.Object({}),
-    async execute(_id, _args, signal) {
+  function reconcile() { if (state.reconcile()) cancelRetry(); }
+  function guard(signal?: AbortSignal) {
+    if (signal?.aborted) throw new Error("Goal operation cancelled.");
+    if (pendingGoal) throw new Error("User changes are awaiting delivery; inspect the updated list next turn.");
+  }
+  const result=(value: unknown)=>({content:[{type:"text" as const,text:JSON.stringify(value,(key,v)=>["setAt","updatedAt","deletedAt","resumedAt"].includes(key) && typeof v === "number" ? new Date(v).toISOString() : v,2)}],details:value});
+  pi.registerTool({name:"goal_show",label:"Show goals",exposure:"codemode",annotations:{readOnlyHint:true},
+    description:"Read shared TODOs or one by ID, immutable setBy (user/assistant), latest editor, timestamps, run scope and budget. List omits soft-deleted items; lookup includes them. Legacy unknown authors are not invented.",
+    parameters:Type.Object({id:Type.Optional(Type.String({minLength:1}))}),
+    async execute(_id,args,signal) {
       if (signal?.aborted) throw new Error("Goal query cancelled.");
-      const current = state.snapshot();
-      const text = current
-        ? `Goal: ${current.text}\nStatus: ${current.status}\nSet time: ${current.setAt === undefined ? "Unknown (legacy record)" : new Date(current.setAt).toISOString()}${current.resumedAt === undefined ? "" : `\nResume time: ${new Date(current.resumedAt).toISOString()}`}\nRunning time: ${duration(current.elapsedMs)}${current.agentTurnsRemaining === undefined ? "" : `\nAgent turns remaining: ${current.agentTurnsRemaining}`}${pendingGoal ? "\nAwaiting delivery." : ""}`
-        : "No goal set.";
-      return { content: [{ type: "text", text }], details: { goal: current ?? null, pendingDelivery: !!pendingGoal } };
-    },
-  });
-  pi.registerTool({
-    name: "goal_set", label: "Set goal",
-    description: "Create a goal only for a multi-step task the user has explicitly requested, never for questions or discussion. Do not expand scope or permissions; required confirmations still apply. Cannot replace an active, paused or cleared goal; only the user can replace or resume it. Agent-created goals pause after 20 delivered model turns (without interrupting tools); only the user can renew the budget with /goal resume. After completion, set another goal only for a new user-requested task, not to extend the old task or evade its budget.",
-    exposure: "codemode",
-    parameters: Type.Object({ text: Type.String({ minLength: 1 }) }),
-    async execute(_id, args, signal, _onUpdate, ctx) {
-      if (signal?.aborted) throw new Error("Goal creation cancelled.");
-      const text = args.text.trim();
-      if (!text) throw new Error("Goal text must not be blank.");
-      if (pendingGoal || (state.goal && state.goal.status !== "complete")) {
-        throw new Error("Cannot replace an active, paused or cleared goal. Ask the user to use /goal <text> or /goal resume.");
-      }
-      if (!ensureCodemode(ctx)) throw new Error("Goal requires the codemode tool.");
-      activate(text, ctx, false, true);
-      return { content: [{ type: "text", text: "Goal set: active. Budget: 20 model turns after delivery. No additional permissions granted." }], details: state.snapshot() };
-    },
-  });
-  function expose() {
-    pi.registerTool({
-      name: "goal_update", label: "Update goal",
-      description: "Complete the active goal when satisfied, or pause it when blocked or awaiting user input.",
-      exposure: state.goal?.status === "active" && !pendingGoal ? "codemode" : "hidden",
-      parameters: Type.Object({ status: Type.Union([Type.Literal("complete"), Type.Literal("pause")]) }),
-      async execute(_id, args, signal, _onUpdate, ctx) {
-        if (signal?.aborted) throw new Error("Goal update cancelled.");
-        if (pendingGoal) throw new Error("New goal is awaiting delivery.");
-        if (state.goal?.status !== "active") throw new Error("No active goal.");
-        cancelRetry();
-        state.transition(args.status === "pause" ? "paused" : "complete");
-        save();
-        expose();
-        ctx.ui.notify(args.status === "pause" ? "Goal paused." : "Goal completed.", "info");
-        return { content: [{ type: "text", text: args.status === "pause" ? "Goal paused." : "Goal completed." }], details: undefined };
-      },
-    });
-  }
-  function message(kind: "set" | "changed" | "resumed" | "still active") {
-    return { customType: MESSAGE, content: reminder(state.goal!.text, kind), display: true };
-  }
-  function restore(ctx: ExtensionContext) {
-    cancelRetry();
-    uiContext = ctx;
-    const entry = [...ctx.sessionManager.getBranch()].reverse()
-      .find(e => e.type === "custom" && e.customType === ENTRY);
-    pendingGoal = undefined;
-    state.restore(entry?.type === "custom" ? entry.data : undefined);
-    expose();
-    updateStatus(ctx);
-    if (state.goal) ctx.ui.notify(`Goal restored: ${state.goal.status}.`, "info");
+      const s=state.snapshot();
+      return result({...s,goals:args.id ? [{...state.get(args.id)}] : s.goals.filter(g=>g.deletedAt===undefined),pendingDelivery:!!pendingGoal});
+    }});
+  pi.registerTool({name:"goal_add",label:"Add goal",exposure:"codemode",
+    description:"Add an assistant-authored TODO for user-requested work. Does not start execution, authorize new scope, renew budgets or bypass pause. Never recreate user-cancelled tasks. Required permissions still apply.",
+    parameters:Type.Object({text:Type.String({minLength:1})}),
+    async execute(_id,args,signal) { guard(signal); const g=state.add(args.text,"assistant"); save(); return result(g); }});
+  pi.registerTool({name:"goal_update",label:"Update goal",exposure:"codemode",
+    description:"Edit TODO text/status without starting execution or renewing budgets. setBy is immutable; updatedBy records assistant. Cannot edit deleted or cancelled items. Rewording revokes execution scope. Respect user edits and permissions.",
+    parameters:Type.Object({id:Type.String({minLength:1}),text:Type.Optional(Type.String({minLength:1})),status:Type.Optional(Type.Union(statuses.map(s=>Type.Literal(s))))}),
+    async execute(_id,args,signal) { guard(signal); const g=state.update(args.id,args,"assistant"); reconcile(); save(); return result(g); }});
+  pi.registerTool({name:"goal_delete",label:"Delete goal",exposure:"codemode",
+    description:"Soft-delete an erroneous/duplicate TODO, retaining history and author. Ask consent before deleting user-created or user-edited items. Does not reset budget or authorize other work. Blocked work is not a reason to delete.",
+    parameters:Type.Object({id:Type.String({minLength:1})}),
+    async execute(_id,args,signal) { guard(signal); const g=state.delete(args.id,"assistant"); reconcile(); save(); return result(g); }});
+  function deliver(kind: string, triggerTurn: boolean) {
+    pendingGoal=randomUUID();
+    pi.sendMessage({...message(kind),details:{goalDelivery:pendingGoal}},{triggerTurn,deliverAs:"steer"});
   }
   function ensureCodemode(ctx: ExtensionContext) {
-    if (!pi.getAllTools().some(t => t.name === "codemode")) {
-      ctx.ui.notify("Goal requires the codemode tool.", "error");
-      return false;
-    }
-    const active = pi.getActiveTools();
-    if (!active.includes("codemode")) pi.setActiveTools([...active, "codemode"]);
+    if (!pi.getAllTools().some(t=>t.name==="codemode")) { ctx.ui.notify("Goal requires the codemode tool.","error"); return false; }
+    const active=pi.getActiveTools(); if (!active.includes("codemode")) pi.setActiveTools([...active,"codemode"]);
     return true;
   }
-  async function action(args: string, ctx: ExtensionCommandContext) {
-    uiContext = ctx;
-    if (args === "exit") args = "clear";
-    if (args === "parse" || args === "pause" || args === "clear") {
-      if (!state.goal) return ctx.ui.notify("No goal set.", "info");
-      if (args !== "clear" && state.goal.status !== "active") return;
-      cancelRetry(); pendingGoal = undefined;
-      state.transition(args === "clear" ? "closed" : "paused");
-      save(); expose();
-      ctx.ui.notify(args === "clear" ? "Goal cleared." : "Goal paused; the current agent turn is not interrupted.", "info");
-      return;
+  async function action(args: string,ctx: ExtensionCommandContext) {
+    uiContext=ctx;
+    if (!args || args==="show") { ctx.ui.notify(summary(),"info"); return; }
+    if (["pause","parse"].includes(args)) {
+      cancelRetry(); state.transition("paused"); save(); ctx.ui.notify("Goal run paused; current tools are not interrupted.","info"); return;
     }
-    const resuming = args === "resume" || args === "continue";
-    if (resuming && state.goal?.status !== "paused") return ctx.ui.notify("No paused goal.", "info");
+    if (["resume","continue"].includes(args)) {
+      if (state.run?.status==="active") return;
+      if (!ensureCodemode(ctx)) return;
+      state.start(); cancelRetry(); save(); deliver("resumed",true); return;
+    }
+    if (["clear","exit"].includes(args)) {
+      cancelRetry(); state.transition("paused");
+      for (const g of state.visible()) if (!["done","cancelled"].includes(g.status)) state.update(g.id,{status:"cancelled"},"user");
+      save(); deliver("cancelled by user",false); return;
+    }
+    const match=/^(add|delete|update)\s+([\s\S]+)$/.exec(args);
+    if (match) {
+      const [,op,rest]=match;
+      if (op==="add") state.add(rest,"user");
+      else if (op==="delete") state.delete(rest.trim(),"user");
+      else {
+        const edit=/^(\S+)\s+(todo|doing|blocked|done|cancelled|text)(?:\s+([\s\S]+))?$/.exec(rest);
+        if (!edit || (edit[2]==="text" && !edit[3]) || (edit[2]!=="text" && edit[3])) throw new Error("Use /goal update <id> <status> or /goal update <id> text <text>.");
+        state.update(edit[1],edit[2]==="text" ? {text:edit[3]} : {status:edit[2] as Status},"user");
+      }
+      cancelRetry(); reconcile(); save(); deliver("changed by user",false); return;
+    }
+    if (["add","delete","update"].includes(args)) throw new Error("Missing goal text or ID.");
     if (!ensureCodemode(ctx)) return;
-    activate(args, ctx, resuming);
+    const g=state.add(args,"user");
+    if (state.run?.status==="active") state.run={...state.run,ids:[...state.run.ids,g.id]};
+    else state.start();
+    cancelRetry(); save(); deliver("added by user",true);
   }
-  function activate(text: string, ctx: ExtensionContext, resuming: boolean, agent = false) {
-    uiContext = ctx;
-    cancelRetry();
-    const kind = resuming ? "resumed" : state.goal && state.goal.status !== "closed" ? "changed" : "set";
-    pendingGoal = randomUUID();
-    if (resuming) state.transition("active");
-    else state.set(text, agent);
-    save(); expose();
-    ctx.ui.notify(resuming ? "Goal active." : kind === "set" ? "Goal set: active." : "Goal changed: active.", "info");
-    pi.sendMessage({ ...message(kind), details: { goalDelivery: pendingGoal } },
-      { triggerTurn: true, deliverAs: "steer" });
+  pi.registerCommand("goal",{description:"Shared TODOs: add <text>, update <id> <status>|text <text>, delete <id>, show, pause, resume; <text> adds and starts.",
+    async handler(args,ctx) { try { await action(args.trim(),ctx); } catch(error) { ctx.ui.notify(error instanceof Error ? error.message : String(error),"error"); } }});
+  function restore(ctx: ExtensionContext) {
+    cancelRetry(); uiContext=ctx; pendingGoal=undefined; afterBacktrack=false;
+    const entry=[...ctx.sessionManager.getBranch()].reverse().find(e=>e.type==="custom" && e.customType===ENTRY);
+    state.restore(entry?.type==="custom" ? entry.data : undefined); updateStatus(ctx);
+    if (state.goals.length) ctx.ui.notify("Goals restored; automatic execution is not resumed.","info");
   }
-  pi.registerCommand("goal", {
-    description: "Set a goal, view status, or pause / resume / clear.",
-    async handler(args, ctx) {
-      args = args.trim();
-      if (args) return action(args, ctx);
-      if (ctx.mode !== "tui") {
-        ctx.ui.notify(state.goal ? `${state.goal.status}: ${state.goal.text} (${duration(state.elapsed())})` : "No goal set.", "info");
-        return;
-      }
-      const displayedGoal = state.goal;
-      const selected = await ctx.ui.custom<string | undefined>((tui, _theme, _keys, done) => {
-        const view = new Text("", 1, 1);
-        const timer = setInterval(() => { view.invalidate(); tui.requestRender(); }, 1000);
-        return {
-          render(width) {
-            view.setText(state.goal
-              ? `Goal: ${state.goal.text}\nStatus: ${state.goal.status}\nRunning time: ${duration(state.elapsed())}\n\n[p] Pause  [r] Resume  [x] Clear goal  [Esc] Back`
-              : "No goal set. Use /goal <text>.\n\n[Esc] Back");
-            return view.render(width);
-          },
-          invalidate() { view.invalidate(); },
-          handleInput(data) {
-            if (matchesKey(data, Key.escape)) done(undefined);
-            else if (data === "p") done("pause");
-            else if (data === "r" || data === "c") done("resume");
-            else if (data === "x") done("clear");
-          },
-          dispose() { clearInterval(timer); },
-        };
-      });
-      if (selected && state.goal === displayedGoal) await action(selected, ctx);
-    },
+  async function retryError(entries: SessionBoundaryDraft[],ctx: ExtensionContext) {
+    if (retryAbort || pendingGoal || ctx.hasPendingMessages()) return;
+    if (retryCount>=MAX_RETRIES) { state.transition("paused"); save(); ctx.ui.notify("Goal run paused after 10 automatic retries.","warning"); return; }
+    const attempt=++retryCount, controller=new AbortController(); retryAbort=controller;
+    const abort=()=>controller.abort(); ctx.signal?.addEventListener("abort",abort,{once:true});
+    ctx.ui.notify(`Goal error; retry in ${2 ** (attempt-1)}s (${attempt}/${MAX_RETRIES}).`,"warning");
+    try {
+      await timers.setTimeout(1000 * 2 ** (attempt-1),undefined,{signal:controller.signal});
+      if (state.run?.status!=="active" || controller.signal.aborted || pendingGoal || ctx.hasPendingMessages()) return;
+      if (attempt===1) { retryRequested=true; return {entries:[...entries,{type:"custom_message" as const,...message("retrying")}],continue:true}; }
+      const last=[...ctx.sessionManager.getBranch()].reverse().find(e=>e.type==="message" && e.message.role!=="system");
+      if (last?.type!=="message" || last.message.role!=="assistant" || last.message.stopReason!=="error") return;
+      retryRequested=true; return {entries:[...entries,{type:"context_edit" as const,targetId:last.id,replacement:null}],continue:true};
+    } catch(error) {
+      if (!controller.signal.aborted) throw error;
+      if (retryAbort===controller && ctx.signal?.aborted && state.run?.status==="active") { state.transition("paused"); save(); }
+    } finally { ctx.signal?.removeEventListener("abort",abort); if (retryAbort===controller) retryAbort=undefined; }
+  }
+  pi.on("message_start",({message:incoming})=>{
+    if (incoming.role==="custom" && incoming.customType===MESSAGE && (incoming.details as {goalDelivery?:string} | undefined)?.goalDelivery===pendingGoal) pendingGoal=undefined;
   });
-  expose();
-  pi.on("message_start", ({ message: incoming }) => {
-    if (incoming.role !== "custom" || incoming.customType !== MESSAGE || !pendingGoal) return;
-    const details = incoming.details as { goalDelivery?: string } | undefined;
-    if (details?.goalDelivery !== pendingGoal) return;
-    pendingGoal = undefined;
-    expose();
+  pi.on("tool_result",event=>{ if (event.toolName==="backtrack" && !event.isError) afterBacktrack=true; });
+  pi.on("session_compact",()=>{ pi.sendMessage(digest(),{triggerTurn:false}); });
+  pi.on("agent_start",()=>{retryRequested=false;});
+  pi.on("agent_settled",(_event,ctx)=>{
+    if (retryRequested && state.run?.status==="active") { cancelRetry(); state.transition("paused"); save(); ctx.ui.notify("Goal run paused after interruption.","info"); }
   });
-  pi.on("agent_start", () => { retryRequested = false; });
-  pi.on("agent_settled", (_event,ctx) => {
-    // Some runtimes expose no abort signal at the settle boundary. If the
-    // requested retry never starts (e.g. Esc during backoff), do not leave an active goal stranded.
-    if (retryRequested && state.goal?.status === "active") {
-      cancelRetry(); state.transition("paused"); save(); expose();
-      ctx.ui.notify("Goal paused after interruption.","info");
-    }
-  });
-  // Refresh elapsed time on activity, without a timer forcing terminal redraws.
-  pi.on("turn_end", (_event, ctx) => {
-    if (!pendingGoal && state.goal?.status === "active" && state.goal.agentTurnsRemaining !== undefined) {
-      if (state.consumeTurn()) {
-        cancelRetry(); state.transition("paused"); expose();
-        ctx.ui.notify("Goal paused: 20-turn budget exhausted. Use /goal resume to continue.", "warning");
-      }
+  pi.on("turn_end",(event,ctx)=>{
+    if (!pendingGoal && state.run?.status==="active") {
+      if (state.consumeTurn()) { cancelRetry(); state.transition("paused"); ctx.ui.notify("Goal run paused: 20-turn budget exhausted. Use /goal resume.","warning"); }
       save();
     }
     updateStatus(ctx);
+    if (afterBacktrack) { afterBacktrack=false; return {entries:[...event.entries,{type:"custom_message" as const,...digest()}]}; }
   });
-  pi.on("session_start", (_event, ctx) => restore(ctx));
-  pi.on("session_tree", (_event, ctx) => restore(ctx));
-  pi.on("session_shutdown", () => {
-    cancelRetry();
-    if (state.goal?.status === "active") { state.transition("paused"); save(); }
-  });
-  pi.on("agent_before_settle", (event, ctx) => {
-    if (state.goal?.status !== "active") return;
-    if (event.outcome === "error" && !ctx.signal?.aborted) {
-      if (!event.continue) return retryError(event.entries,ctx);
-      return;
-    }
-    if (event.outcome !== "completed" || ctx.signal?.aborted) {
-      cancelRetry();
-      pendingGoal = undefined;
-      state.transition("paused"); save(); expose();
-      ctx.ui.notify(event.outcome === "error" ? "Goal paused after an error." : "Goal paused after interruption.", "info");
-      return;
-    }
-    retryCount = 0;
-    save();
-    if (pendingGoal || ctx.hasPendingMessages() || event.continue) return;
-    return {
-      entries: [...event.entries, { type: "custom_message" as const, ...message("still active") }],
-      continue: true,
-    };
+  pi.on("session_start",(_event,ctx)=>restore(ctx));
+  pi.on("session_tree",(_event,ctx)=>restore(ctx));
+  pi.on("session_shutdown",()=>{cancelRetry(); if (state.run?.status==="active") {state.transition("paused");save();}});
+  pi.on("agent_before_settle",(event,ctx)=>{
+    if (state.run?.status!=="active") return;
+    if (event.outcome==="error" && !ctx.signal?.aborted) { if (!event.continue) return retryError(event.entries,ctx); return; }
+    if (event.outcome!=="completed" || ctx.signal?.aborted) { cancelRetry(); state.transition("paused"); save(); ctx.ui.notify("Goal run paused after interruption.","info"); return; }
+    retryCount=0; reconcile(); save();
+    if (state.run?.status!=="active" || pendingGoal || ctx.hasPendingMessages() || event.continue) return;
+    return {entries:[...event.entries,{type:"custom_message" as const,...message("still active")}],continue:true};
   });
 }

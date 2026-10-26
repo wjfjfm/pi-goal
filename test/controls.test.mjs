@@ -15,310 +15,158 @@ function fixture({codemode=true}={}) {
   extension(pi);
   return {handlers,tools,entries,messages,notices,statuses,ctx,run:arg=>command(arg,ctx),idle:v=>idle=v,pending:v=>pending=v,active:()=>active,state:()=>entries.at(-1)?.data};
 }
-test('agent set validates input, cancellation, dependencies and refuses replacement or reopening',async()=>{
-  const h=fixture();
-  const set=(text,signal)=>h.tools.get('goal_set').execute('set',{text},signal,undefined,h.ctx);
-  assert.equal(h.tools.get('goal_set').exposure,'codemode');
-  await assert.rejects(()=>set('  '),/blank/);
-  await assert.rejects(()=>set('task',AbortSignal.abort()),/cancelled/);
-  assert.equal(h.entries.length,0);
-  await set('  task  ');assert.equal(h.state().text,'task');
-  assert.equal(h.state().agentTurnsRemaining,20);
-  for(const change of ['active','pause','clear']){
-    if(change!=='active')await h.run(change);
-    const count=h.entries.length;
-    await assert.rejects(()=>set('replacement'),/Cannot replace/);
-    h.handlers.session_start({},h.ctx);
-    await assert.rejects(()=>set('replacement'),/Cannot replace/);
-    assert.equal(h.entries.length,count);
-  }
-  await h.run('user replacement');
-  assert.equal(h.state().agentTurnsRemaining,undefined);
-  await h.tools.get('goal_update').execute('done',{status:'complete'},undefined,undefined,h.ctx);
-  await set('new authorized task');assert.equal(h.state().agentTurnsRemaining,20);
-  const absent=fixture({codemode:false});
-  await assert.rejects(()=>absent.tools.get('goal_set').execute('set',{text:'task'},undefined,undefined,absent.ctx),/requires/);
-  assert.equal(absent.entries.length,0);
-});
 
-test('agent turn budget starts after delivery, persists, pauses at 20 and only user renews',async()=>{
-  const h=fixture();h.idle(false);
-  const set=()=>h.tools.get('goal_set').execute('set',{text:'task'},undefined,undefined,h.ctx);
-  await set();
-  await assert.rejects(set,/Cannot replace/);
-  h.handlers.turn_end({},h.ctx);assert.equal(h.state().agentTurnsRemaining,20);
-  h.handlers.message_start({message:{role:'custom',...h.messages[0]}});
-  for(let n=1;n<=20;n++){
-    h.handlers.turn_end({},h.ctx);
-    assert.equal(h.state().agentTurnsRemaining,20-n);
-    assert.equal(h.state().status,n===20?'paused':'active');
-  }
-  assert.equal(h.handlers.agent_before_settle({outcome:'completed',entries:[]},h.ctx),undefined);
-  await assert.rejects(set,/Cannot replace/);
-  h.handlers.session_start({},h.ctx);
-  assert.equal((await h.tools.get('goal_show').execute('show',{})).details.goal.agentTurnsRemaining,0);
-  await assert.rejects(set,/Cannot replace/);
-  await h.run('resume');assert.equal(h.state().agentTurnsRemaining,20);
+const call=(h,name,args={},signal)=>h.tools.get(name).execute('test',args,signal,undefined,h.ctx);
+const show=h=>call(h,'goal_show').then(r=>r.details);
+const boundary={outcome:'completed',entries:[]};
+test('CRUD is codemode-only, authorship is immutable, add does not execute',async()=>{
+  const h=fixture();
+  assert.equal(h.tools.has('goal_set'),false);
+  for(const tool of h.tools.values())assert.equal(tool.exposure,'codemode');
+  await assert.rejects(()=>call(h,'goal_add',{text:'  '}),/blank/);
+  await assert.rejects(()=>call(h,'goal_add',{text:'x'},AbortSignal.abort()),/cancelled/);
+  const g=(await call(h,'goal_add',{text:' task '})).details;
+  assert.equal(g.setBy,'assistant');assert.equal(g.text,'task');
+  assert.equal(h.state().run,null);assert.equal(h.messages.length,0);
+  await h.run('update '+g.id+' text user edit');
+  const updated=(await show(h)).goals[0];
+  assert.equal(updated.setBy,'assistant');assert.equal(updated.updatedBy,'user');
+  await call(h,'goal_update',{id:g.id,status:'doing',setBy:'user'});
+  assert.equal(h.state().goals[0].setBy,'assistant');
+  assert.equal(h.state().run,null);
+  await h.run('add user task');
+  assert.equal(h.state().goals[1].setBy,'user');
+  await assert.rejects(()=>call(h,'goal_update',{id:g.id}),/Specify/);
+  await assert.rejects(()=>call(h,'goal_update',{id:g.id,text:' '}),/blank/);
+});
+test('soft deletion hides the item but keeps its author and history',async()=>{
+  const h=fixture(), g=(await call(h,'goal_add',{text:'duplicate'})).details;
+  await call(h,'goal_delete',{id:g.id});
+  assert.equal((await show(h)).goals.length,0);
+  const item=(await call(h,'goal_show',{id:g.id})).details.goals[0];
+  assert.equal(item.setBy,'assistant');assert.ok(item.deletedAt);
+  await assert.rejects(()=>call(h,'goal_update',{id:g.id,status:'done'}),/deleted/);
+  assert.equal(h.entries.length,2);
+});
+test('queries are read-only, including paused, deleted and pending states',async()=>{
+  const h=fixture();await h.run('work');h.idle(false);
+  await h.run('add later');
+  const before=[h.entries.length,h.messages.length,h.notices.length];
+  const s=await show(h);
+  assert.equal(s.pendingDelivery,true);
+  s.goals[0].text='mutated';s.run.ids.length=0;
+  assert.equal((await show(h)).goals[0].text,'work');
+  assert.equal((await show(h)).run.ids.length,1);
+  assert.deepEqual([h.entries.length,h.messages.length,h.notices.length],before);
+});
+test('user edit delivery bars stale writes; cancelled tasks cannot be revived',async()=>{
+  const h=fixture();await h.run('work');
+  const id=h.state().goals[0].id;
+  h.idle(false);await h.run('update '+id+' cancelled');
+  await assert.rejects(()=>call(h,'goal_update',{id,status:'done'}),/awaiting delivery/);
   h.handlers.message_start({message:{role:'custom',...h.messages.at(-1)}});
-  h.handlers.turn_end({},h.ctx);assert.equal(h.state().agentTurnsRemaining,19);
-  h.handlers.session_tree({},h.ctx);
-  assert.equal((await h.tools.get('goal_show').execute('show',{})).details.goal.agentTurnsRemaining,19);
-  await h.run('replacement');
-  for(let n=0;n<25;n++)h.handlers.turn_end({},h.ctx);
-  assert.equal(h.state().status,'active');
-  assert.equal(h.state().agentTurnsRemaining,undefined);
+  await assert.rejects(()=>call(h,'goal_update',{id,status:'done'}),/Cancelled/);
+  await h.run('update '+id+' todo');
+  h.handlers.message_start({message:{role:'custom',...h.messages.at(-1)}});
+  await call(h,'goal_update',{id,status:'doing'});
+  assert.notEqual(h.state().run.status,'active');
 });
-
-test('show returns a read-only snapshot without delivery or lifecycle side effects',async()=>{
-  const h=fixture();
-  const show=()=>h.tools.get('goal_show').execute('show',{});
-  assert.equal((await show()).details.goal,null);
-  await h.run('target');
-  for(const change of ['active','pause','resume','complete','clear','replacement']) {
-    if(change==='complete')await h.tools.get('goal_update').execute('done',{status:'complete'},undefined,undefined,h.ctx);
-    else if(change==='replacement'){h.idle(false);await h.run('replacement');}
-    else if(change!=='active')await h.run(change);
-    const counts=[h.entries.length,h.messages.length,h.notices.length,h.statuses.length];
-    const tool=h.tools.get('goal_update');
-    assert.equal(h.tools.get('goal_show').exposure,'codemode');
-    assert.ok(!JSON.stringify(tool.parameters).includes('"show"'),'show is not a goal status');
-    const result=await show();
-    assert.equal(result.details.goal.text,h.state().text);
-    assert.equal(result.details.goal.status,h.state().status);
-    assert.ok(result.details.goal.elapsedMs>=h.state().elapsedMs);
-    assert.equal(result.details.pendingDelivery,change==='replacement');
-    assert.match(result.content[0].text,/Running time:/);
-    assert.ok(result.content[0].text.includes('Set time: '+new Date(result.details.goal.setAt).toISOString()));
-    if(result.details.goal.resumedAt===undefined)assert.doesNotMatch(result.content[0].text,/Resume time:/);
-    else assert.ok(result.content[0].text.includes('Resume time: '+new Date(result.details.goal.resumedAt).toISOString()));
-    assert.deepEqual([h.entries.length,h.messages.length,h.notices.length,h.statuses.length],counts);
-    assert.equal(h.tools.get('goal_update'),tool);
-  }
-  await assert.rejects(()=>h.tools.get('goal_update').execute('done',{status:'complete'}),/awaiting delivery/);
+test('one run budget survives additions and updates; only user resume renews',async()=>{
+  const h=fixture();h.idle(false);await h.run('first');
+  h.handlers.turn_end({entries:[]},h.ctx);assert.equal(h.state().run.turnsRemaining,20);
+  h.handlers.message_start({message:{role:'custom',...h.messages.at(-1)}});
+  for(let i=0;i<19;i++)h.handlers.turn_end({entries:[]},h.ctx);
+  await call(h,'goal_add',{text:'second'});
+  await call(h,'goal_update',{id:h.state().goals[0].id,status:'doing'});
+  assert.equal(h.state().run.turnsRemaining,1);assert.equal(h.state().run.ids.length,1);
+  h.handlers.turn_end({entries:[]},h.ctx);
+  assert.equal(h.state().run.status,'paused');assert.equal(h.state().run.turnsRemaining,0);
+  await call(h,'goal_add',{text:'third'});
+  assert.equal(h.state().run.turnsRemaining,0);
+  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
+  await h.run('resume');assert.equal(h.state().run.turnsRemaining,20);
+  assert.equal(h.state().run.ids.length,3);
 });
-
-test('show does not cancel an automatic retry',async t=>{
-  t.mock.timers.enable({apis:['setTimeout']});
-  const h=fixture();await h.run('target');
-  const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
-  await h.tools.get('goal_show').execute('show',{});
-  t.mock.timers.tick(1000);
-  assert.equal((await retry).continue,true);
-});
-
-test('footer shows goal lifecycle and clears on clear or empty session restore',async()=>{
-  const h=fixture();h.ctx.hasUI=true;
-  const status=()=>h.statuses.at(-1);
-  h.handlers.session_start({},h.ctx);assert.deepEqual(status(),['pi-goal',undefined]);
-  await h.run('target');assert.match(status()[1],/^Pursuing goal \(/);
-  await h.run('pause');assert.equal(status()[1],'Goal paused (/goal resume)');
-  await h.run('continue');assert.match(status()[1],/^Pursuing goal/);
-  h.handlers.turn_end({},h.ctx);assert.match(status()[1],/^Pursuing goal/);
-  await h.tools.get('goal_update').execute('done',{status:'complete'},undefined,undefined,h.ctx);
-  assert.match(status()[1],/^Goal achieved \(/);
-  await h.run('clear');assert.deepEqual(status(),['pi-goal',undefined]);
-  await h.run('new');h.handlers.session_start({},h.ctx);
-  assert.equal(status()[1],'Goal paused (/goal resume)');
-  h.entries.length=0;h.handlers.session_tree({},h.ctx);
-  assert.deepEqual(status(),['pi-goal',undefined]);
-  assert.equal(h.messages.length,3);
-});
-
-test('only activation transitions add messages to model context', async()=>{
-  const h=fixture();
-  const notice=()=>h.notices.at(-1)?.[0];
-  await h.run('first');assert.equal(notice(),'Goal set: active.');
-  await h.run('second');assert.equal(notice(),'Goal changed: active.');
-  const count=h.messages.length;
-  await h.run('pause');assert.match(notice(),/^Goal paused/);
-  await h.run('continue');assert.equal(notice(),'Goal active.');
-  await h.tools.get('goal_update').execute('pause',{status:'pause'},undefined,undefined,h.ctx);
-  assert.equal(notice(),'Goal paused.');
-  await h.run('continue');
-  await h.tools.get('goal_update').execute('complete',{status:'complete'},undefined,undefined,h.ctx);
-  assert.equal(notice(),'Goal completed.');
-  await h.run('clear');assert.equal(notice(),'Goal cleared.');
-  assert.equal(h.messages.length,count+2);
-  await h.run('third');
-  const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
-  assert.match(notice(),/automatically resuming in 1s/);
-  await h.run('pause');await retry;
-  await h.run('continue');
-  h.handlers.agent_before_settle({outcome:'aborted'},h.ctx);
-  assert.equal(notice(),'Goal paused after interruption.');
-  h.handlers.session_start({},h.ctx);
-  assert.equal(notice(),'Goal restored: paused.');
-});
-
-test('pause/parse stop continuation, continue resumes, clear hides the tool', async()=>{
-  const h=fixture(); await h.run('target');
-  assert.deepEqual(h.active(),['read','codemode']);
-  assert.equal(h.tools.get('goal_update').exposure,'codemode');
-  const event={outcome:'completed',entries:[],continue:false};
-  for (const alias of ['parse','pause']) {
-    await h.run(alias); assert.equal(h.state().status,'paused');
-    assert.equal(h.handlers.agent_before_settle(event,h.ctx),undefined);
-    await assert.rejects(()=>h.tools.get('goal_update').execute('id',{}),/No active/);
-    await h.run('continue'); assert.equal(h.state().status,'active');
-  }
-  assert.equal(h.messages.length,3);
-  await h.run('clear'); assert.equal(h.state().status,'closed');
-  assert.equal(h.tools.get('goal_update').exposure,'hidden');
-});
-test('paused to active injects once; repeated resume and continue are no-ops',async()=>{
-  const h=fixture();await h.run('target');await h.run('pause');
-  const count=h.messages.length;
+test('new and reworded tasks are not implicitly authorized; blocked/done reconcile run',async()=>{
+  const h=fixture();await h.run('first');
+  const first=h.state().goals[0].id;
+  await call(h,'goal_add',{text:'later'});
+  await call(h,'goal_update',{id:first,status:'done'});
+  assert.equal(h.state().run.status,'complete');
   await h.run('resume');
-  assert.equal(h.messages.length,count+1);
-  assert.match(h.messages.at(-1).content,/^goal resumed: target/);
-  assert.equal(h.messages.at(-1).customType,'pi-goal');
-  await h.run('resume');await h.run('continue');
-  assert.equal(h.messages.length,count+1);
-  await h.run('pause');await h.run('continue');
-  assert.equal(h.messages.length,count+2);
+  const later=h.state().goals[1].id;
+  await call(h,'goal_update',{id:later,status:'blocked'});
+  assert.equal(h.state().run.status,'paused');
+  await call(h,'goal_update',{id:later,status:'todo'});
+  assert.equal(h.state().run.status,'paused');
+  await h.run('resume');
+  await call(h,'goal_update',{id:later,text:'different'});
+  assert.equal(h.state().run.status,'complete');
+  assert.deepEqual(h.state().run.ids,[]);
 });
-test('pending messages and existing boundary continuation suppress redundant reminders',async()=>{
-  const h=fixture();await h.run('target');
-  const event={outcome:'completed',entries:[{type:'custom',customType:'other'}],continue:false};
-  h.pending(true);assert.equal(h.handlers.agent_before_settle(event,h.ctx),undefined);
-  h.pending(false);assert.equal(h.handlers.agent_before_settle({...event,continue:true},h.ctx),undefined);
-  const result=h.handlers.agent_before_settle(event,h.ctx);
-  assert.equal(result.continue,true);assert.deepEqual(result.entries[0],event.entries[0]);
-  assert.match(result.entries[1].content,/^goal still active: target/);
-});
-test('abort pauses goal; reload and branch changes restore only branch state without running',async()=>{
-  const h=fixture();await h.run('target');
+test('pause, abort, restore and clear do not delete list or auto-resume',async()=>{
+  const h=fixture();await h.run('work');
+  await h.run('pause');assert.equal(h.state().run.status,'paused');
+  await h.run('resume');const n=h.messages.length;
+  await h.run('resume');assert.equal(h.messages.length,n);
   h.handlers.agent_before_settle({outcome:'aborted'},h.ctx);
-  assert.equal(h.state().status,'paused');
-  await h.run('continue');
-  const count=h.messages.length;
-  h.handlers.session_start({},h.ctx);
-  assert.equal(h.tools.get('goal_update').exposure,'hidden');
-  assert.equal(h.messages.length,count);
-  await h.run('continue');assert.equal(h.state().status,'active');
+  assert.equal(h.state().run.status,'paused');
+  await h.run('resume');h.handlers.session_start({},h.ctx);
+  assert.equal((await show(h)).run.status,'paused');
+  await h.run('clear');assert.equal(h.state().goals[0].status,'cancelled');
+  assert.equal(h.state().goals[0].setBy,'user');
+  await h.run('resume');assert.notEqual(h.state().run.status,'active');
   h.entries.length=0;h.handlers.session_tree({},h.ctx);
-  assert.equal(h.tools.get('goal_update').exposure,'hidden');
-  await h.run('continue');assert.equal(h.messages.length,count+1);
+  assert.equal((await show(h)).goals.length,0);
 });
-test('busy agent queues replacement and rejects old completion until delivery; missing codemode leaves goal unset',async()=>{
-  const h=fixture();await h.run('original');
-  const oldTool=h.tools.get('goal_update');
-  h.idle(false);await h.run('replacement');
-  assert.equal(h.state().text,'replacement');
-  assert.match(h.messages[1].content,/^goal changed: replacement/);
-  await assert.rejects(()=>oldTool.execute('old',{status:'complete'}),/awaiting delivery/);
-  h.handlers.message_start({message:{role:'custom',...h.messages[1]}});
-  await h.run('pause');assert.equal(h.state().status,'paused');
-  await h.run('continue');assert.equal(h.state().status,'active');
-  assert.equal(h.messages.length,3);
-  const boundary={outcome:'completed',entries:[],continue:false};
-  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
-  await assert.rejects(()=>oldTool.execute('old',{status:'complete'}),/awaiting delivery/);
-  h.handlers.message_start({message:{role:'custom',...h.messages[2]}});
+test('continuations compose and missing codemode prevents starting',async()=>{
+  const h=fixture();await h.run('work');
+  h.pending(true);assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
+  h.pending(false);assert.equal(h.handlers.agent_before_settle({...boundary,continue:true},h.ctx),undefined);
   assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
-  await h.run('exit');assert.equal(h.state().status,'closed');
-  assert.equal(h.messages.length,3);
-  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
-  const absent=fixture({codemode:false});await absent.run('target');
-  assert.equal(absent.entries.length,0);assert.equal(absent.messages.length,0);
+  const absent=fixture({codemode:false});await absent.run('work');
+  assert.equal(absent.entries.length,0);
+  await absent.run('add planning only');assert.equal(absent.state().run,null);
 });
-test('ten retries double delay from 1 to 512 seconds; manual resume resets budget',async t=>{
+test('10 exponential retries preserve failed history and stop; show does not cancel retry',async t=>{
   t.mock.timers.enable({apis:['setTimeout']});
-  const h=fixture();await h.run('retry goal');
-  for(let attempt=1;attempt<=10;attempt++){
-    h.entries.push({type:'message',id:'error-'+attempt,message:{role:'assistant',stopReason:'error',content:[]}});
+  const h=fixture();await h.run('work');
+  for(let i=1;i<=10;i++){
+    h.entries.push({type:'message',id:'error-'+i,message:{role:'assistant',stopReason:'error'}});
     const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
-    assert.match(h.notices.at(-1)[0],new RegExp('in '+2**(attempt-1)+'s'));
-    assert.ok(h.notices.at(-1)[0].includes('('+attempt+'/10)'));
-    let done=false;retry.then(()=>done=true);
-    t.mock.timers.tick(1000*2**(attempt-1)-1);
-    await Promise.resolve();assert.equal(done,false);
-    t.mock.timers.tick(1);
-    const result=await retry;
-    assert.equal(result.continue,true);
-    assert.equal(result.entries.filter(e=>e.type==="custom_message").length,attempt===1?1:0,"resume reminder must not accumulate");
-    if(attempt>1)assert.deepEqual(result.entries[0],{type:"context_edit",targetId:"error-"+attempt,replacement:null});
+    await show(h);
+    t.mock.timers.tick(1000*2**(i-1));
+    const r=await retry;assert.equal(r.continue,true);
+    if(i>1)assert.deepEqual(r.entries[0],{type:'context_edit',targetId:'error-'+i,replacement:null});
     h.handlers.agent_start();
   }
-  assert.equal(await h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx),undefined);
-  assert.equal(h.state().status,'paused');
-  assert.match(h.notices.at(-1)[0],/10 failed automatic retries/);
-  await h.run('resume');
-  const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
-  assert.match(h.notices.at(-1)[0],/1s \(1\/10\)/);
-  await h.run('pause');assert.equal(await retry,undefined);
+  await h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
+  assert.equal(h.state().run.status,'paused');
 });
-test('pending retry is cancelled by pause, clear, replacement, restore and shutdown',async()=>{
-  for(const action of ['pause','clear','replacement','restore','shutdown']){
-    const h=fixture();await h.run('original');
-    const result=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
+test('retry cancellation on pause, edits, clear, restore and shutdown',async()=>{
+  for(const action of ['pause','add later','clear','restore','shutdown']){
+    const h=fixture();await h.run('work');
+    const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
     if(action==='restore')h.handlers.session_start({},h.ctx);
     else if(action==='shutdown')h.handlers.session_shutdown();
     else await h.run(action);
-    assert.equal(await result,undefined,action);
-    if(action==='replacement')assert.equal(h.state().text,'replacement');
-    else if(action==='restore')assert.equal(h.tools.get('goal_update').exposure,'hidden');
-    else assert.notEqual(h.state().status,'active',action);
+    assert.equal(await retry,undefined);
   }
 });
-test('existing error continuation does not wait or consume the goal retry budget',async t=>{
-  t.mock.timers.enable({apis:['setTimeout']});
-  const h=fixture();await h.run('target');
-  const notices=h.notices.length;
-  for(let n=0;n<12;n++) {
-    assert.equal(await h.handlers.agent_before_settle({outcome:'error',entries:[],continue:true},h.ctx),undefined);
-  }
-  assert.equal(h.notices.length,notices);
-  assert.equal(h.state().status,'active');
-  const retry=h.handlers.agent_before_settle({outcome:'error',entries:[],continue:false},h.ctx);
-  assert.match(h.notices.at(-1)[0],/1s \(1\/10\)/);
-  t.mock.timers.tick(1000);
-  assert.equal((await retry).continue,true);
-});
-
-test('RPC status uses notification rather than a terminal-only component',async()=>{
-  const h=fixture();await h.run('rpc goal');
-  h.ctx.mode='rpc';h.ctx.hasUI=true;
-  h.ctx.ui.custom=()=>assert.fail('RPC cannot render a custom TUI');
-  const count=h.messages.length;
-  await h.run('');
-  assert.match(h.notices.at(-1)[0],/active: rpc goal/);
-  assert.equal(h.messages.length,count);
-});
-
-test('stale menu action cannot change a replaced or restored goal',async()=>{
-  for(const change of ['replacement','restore']) {
-    const h=fixture();await h.run('original');h.ctx.hasUI=true;
-    let finish;
-    h.ctx.ui.custom=()=>new Promise(resolve=>{finish=resolve;});
-    const menu=h.run('');
-    if(change==='replacement')await h.run('replacement');
-    else h.handlers.session_tree({},h.ctx);
-    const before=h.entries.length;
-    finish('clear');await menu;
-    assert.equal(h.entries.length,before,change);
-    assert.notEqual(h.state().status,'closed');
-  }
-});
-
-test('setting a goal after clear starts a new goal rather than changing the closed one',async()=>{
-  const h=fixture();await h.run('old');await h.run('clear');await h.run('new');
-  assert.match(h.messages.at(-1).content,/^goal set: new/);
-});
-
-test('menu reports state and time, shortcuts pause/resume/clear',async()=>{
-  const h=fixture();await h.run('menu goal'); h.ctx.hasUI=true;
-  for (const [key,status] of [['p','paused'],['r','active'],['x','closed']]) {
-    h.ctx.ui.custom=async factory=>{
-      let result;
-      const component=await factory({requestRender(){}},{},{},value=>result=value);
-      try {
-        assert.match(component.render(100).join('\n'),/menu goal/);
-        assert.match(component.render(100).join('\n'),/Running time:/);
-        component.handleInput(key);
-        return result;
-      } finally {component.dispose();}
-    };
-    await h.run('');assert.equal(h.state().status,status);
-  }
+test('compact and successful backtrack inject one small digest without execution or budget reset',async()=>{
+  const h=fixture();await h.run('add task');
+  const before=h.entries.length;
+  h.handlers.session_compact({},h.ctx);
+  assert.match(h.messages.at(-1).content,/^\[goal status: 1 todo/);
+  assert.equal(h.entries.length,before);
+  h.handlers.tool_result({toolName:'backtrack',isError:true});
+  assert.equal(h.handlers.turn_end({entries:[]},h.ctx),undefined);
+  h.handlers.tool_result({toolName:'backtrack',isError:false});
+  const original={type:'custom',customType:'other',data:{}};
+  const r=h.handlers.turn_end({entries:[original]},h.ctx);
+  assert.deepEqual(r.entries[0],original);
+  assert.equal(r.entries[1].customType,'pi-goal');
+  assert.match(r.entries[1].content,/tools.goal_show/);
+  assert.equal(h.handlers.turn_end({entries:[]},h.ctx),undefined);
+  assert.equal(h.state().run,null);
 });

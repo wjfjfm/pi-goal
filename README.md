@@ -1,43 +1,67 @@
 # pi-goal
 
-让 Agent 围绕一个目标持续工作，直到完成或遇到阻塞。
+人和 Agent 共用的 TODO 清单，支持独立的持续执行控制。
 
-## 使用
-
-```text
-/goal 修复测试失败，直到全部通过
-```
-
-目标未完成时，Agent 每次准备结束都会收到提醒并继续执行。完成或遇到阻塞时，由 Agent 通过 codemode 更新状态：
+## 清单工具（仅 codemode）
 
 ```js
-await tools.goal_set({text: "完成用户已明确要求的多步任务"}); // 创建，不替换
-await tools.goal_show({});     // 查看目标、状态、设置/恢复时间及累计运行时间
-await tools.goal_update({status: "complete"}); // 完成
-await tools.goal_update({status: "pause"});    // 阻塞或等待用户
+await tools.goal_add({text: "补充测试"});
+await tools.goal_show({});
+await tools.goal_show({id: "目标 ID"});
+await tools.goal_update({id: "目标 ID", status: "doing"});
+await tools.goal_update({id: "目标 ID", text: "补充集成测试"});
+await tools.goal_delete({id: "目标 ID"});
 ```
 
-这些工具仅通过 codemode 提供，不注册为模型的独立工具。Agent 只能为用户明确要求的多步任务创建目标，不能扩大范围或权限。已有运行中、暂停或清除的目标时，`goal_set` 拒绝设置，须由用户用 `/goal <目标>` 替换或 `/goal resume` 恢复；完成后可为用户的新任务创建目标。
+状态：`todo / doing / blocked / done / cancelled`。每项记录不可变的
+`setBy: "user" | "assistant"`、最近修改者 `updatedBy` 和时间。
+删除为软删除，默认清单隐藏，但仍可按 ID 查看，会话历史保留历次快照。
+旧记录无法确定的来源显示 unknown，不伪造作者。
 
-Agent 创建的目标在提示送达后最多运行 20 个模型回合，耗尽即暂停目标自动继续，不强制中断工具或当前执行。`goal_show` 显示剩余预算；用户 `/goal resume` 补充 20 轮，用户直接设置的目标不受此限制。
+新增、编辑、删除都**不启动执行、不补充预算**；设为 doing 也不代表授权。
+Agent 不得扩大用户任务范围、绕过确认或重建已取消任务；删除用户创建或修改过的项应先征求同意。
+
+## 用户命令
 
 | 命令 | 操作 |
 | --- | --- |
-| `/goal <目标>` | 设置或替换目标 |
-| `/goal` | 查看目标、状态和累计运行时间 |
-| `/goal pause` | 暂停自动继续，不中断当前执行 |
-| `/goal resume` | 恢复目标并继续执行 |
-| `/goal clear` | 停止追踪目标 |
+| `/goal` 或 `/goal show` | 查看清单、来源和执行状态 |
+| `/goal add <文本>` | 仅新增，来源为 user |
+| `/goal update <id> <状态>` | 修改状态 |
+| `/goal update <id> text <文本>` | 修改内容 |
+| `/goal delete <id>` | 软删除 |
+| `/goal pause` | 暂停自动继续，不中断工具 |
+| `/goal resume` | 纳入当前 todo/doing 项，开始一轮 20 回合的执行 |
+| `/goal <文本>` | 新增并开始执行；运行中使用则纳入新项但不重置预算 |
+| `/goal clear` | 兼容命令：暂停并取消未完成项，不删除历史 |
 
-状态栏显示运行、暂停或完成状态。错误后最多自动重试 10 次，等待时间逐次增加，仍失败则暂停。主动中断、暂停或清除会停止自动恢复；重新打开会话或切换历史分支后，运行中的目标恢复为暂停，由用户决定是否继续。
+预算属于整轮运行，不属于单项。运行中 add 的项不自动纳入执行范围，
+重写文本也会撤销该项的执行范围；需要用户暂停后 resume。
+重复 resume 不补充正在运行的预算。blocked 项须先改回 todo/doing。
+授权范围内无可执行项时，存在 blocked 则暂停，否则结束本轮。
+
+用户修改通过 steer 在工具批次后送达，送达前拒绝 Agent 写回。
+Agent 不能修改已取消或删除的项。暂停不阻止维护清单，也不会撤回已排队消息或中断工具。
+
+backtrack/compact 完成后补一条简短状态消息，例如：
+
+```text
+[goal status: 5 todo, 1 doing, 3 blocked, 2 done, 0 cancelled; run: paused; use codemode tools.goal_show({}) for details]
+```
+
+摘要使用清单实际状态，执行状态单列；不恢复执行、不重置预算。
+错误最多自动重试 10 次，退避 1–512 秒；中断或预算耗尽暂停。
+重新打开会话、切换历史分支只恢复清单和预算，不自动运行。
+
+原 `goal_set` 已由 `goal_add` 替代；旧 `goal_update({status:"complete"|"pause"})`
+改用带 ID 的 done/blocked 状态。执行暂停使用用户命令。
 
 ## 本地运行
 
-需要 Pi 的 codemode 工具和 `agent_before_settle` 扩展事件，Node.js ≥22.19.0。
+需要 Pi 1.3.0 的 codemode、执行边界事件，Node.js ≥22.19.0。
 
 ```sh
-cd /path/to/pi-goal
 npm ci --ignore-scripts
-npm run build
+npm test
 pi -e ./src/index.ts
 ```

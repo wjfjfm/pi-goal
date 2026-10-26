@@ -1,0 +1,41 @@
+
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {GoalState} from '../dist/state.js';
+test('source, timestamps and tombstones persist; snapshots are detached',()=>{
+  let now=100;
+  const s=new GoalState(()=>now),g=s.add('first','user');
+  now=200;s.update(g.id,{text:'edited'},'assistant');
+  assert.equal(s.get(g.id).setAt,100);assert.equal(s.get(g.id).setBy,'user');
+  assert.equal(s.get(g.id).updatedAt,200);assert.equal(s.get(g.id).updatedBy,'assistant');
+  now=300;s.delete(g.id,'user');
+  const snap=s.snapshot();s.restore(snap);
+  assert.equal(s.visible().length,0);assert.equal(s.get(g.id).deletedAt,300);
+  snap.goals[0].text='bad';assert.equal(s.get(g.id).text,'edited');
+});
+test('elapsed time excludes pause and offline intervals; restore pauses with remaining budget',()=>{
+  let now=0;const s=new GoalState(()=>now);
+  s.add('work','assistant');s.start();now=1000;s.consumeTurn();s.transition('paused');
+  now=5000;assert.equal(s.elapsed(),1000);s.start();now=6000;s.consumeTurn();
+  const snap=s.snapshot();assert.equal(snap.run.elapsedMs,2000);
+  now=100000;s.restore(snap);assert.equal(s.run.status,'paused');
+  assert.equal(s.elapsed(),2000);assert.equal(s.run.turnsRemaining,19);
+});
+test('legacy migration preserves known assistant source without inventing unknown provenance',()=>{
+  const s=new GoalState();
+  s.restore({text:'old',status:'active',elapsedMs:100,agentTurnsRemaining:10,setAt:123});
+  assert.equal(s.goals[0].setBy,'assistant');assert.equal(s.goals[0].setAt,123);
+  assert.equal(s.run.status,'paused');
+  s.restore({text:'old',status:'complete',elapsedMs:100});
+  assert.equal(s.goals[0].status,'done');assert.equal(s.goals[0].setBy,undefined);
+  s.restore({text:'old',status:'closed',elapsedMs:100});
+  assert.equal(s.goals[0].status,'cancelled');
+  s.restore({text:'bad',status:'active',elapsedMs:-1});assert.equal(s.goals.length,0);
+});
+test('malformed snapshots are filtered; invalid budget fails closed',()=>{
+  const s=new GoalState();
+  s.restore({version:2,goals:[null,{id:'x',text:'ok',status:'todo',setBy:'fake',setAt:Infinity},{id:'x',text:'duplicate',status:'done'}],run:{status:'active',ids:['x','missing'],elapsedMs:20,turnsRemaining:999}});
+  assert.equal(s.goals.length,1);assert.equal(s.goals[0].setBy,undefined);
+  assert.equal(s.goals[0].setAt,undefined);assert.equal(s.run.turnsRemaining,0);
+  assert.deepEqual(s.run.ids,['x']);assert.equal(s.run.status,'paused');
+});

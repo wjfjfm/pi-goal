@@ -1,34 +1,44 @@
 # pi-goal 维护指南
 
-## 约定
+- README 仅保留用途和用户操作；技术约束写在此处。
+- 小型扩展：state.ts 管清单/运行状态，index.ts 管工具、命令、Pi 事件。
+- Pi 1.3.0，Node.js ≥22.19.0；npm test 构建并运行隔离的模拟 provider + 真实 SDK/codemode 测试。
 
-- README 只保留用途、操作和必要提醒；实现、测试及维护约束写在这里。
-- 保持小型扩展：`src/state.ts` 管目标状态和计时，`src/index.ts` 管 Pi 事件、命令、工具和 UI。不要为少量状态转换添加框架。
-- 开发依赖与当前宿主 Pi 1.3.0 对齐；Node.js ≥22.19.0。`npm test` 构建并运行单元测试及真实 SDK/codemode 集成测试。
+## 清单与运行
 
-## 生命周期与投递
+- 持久化 pi-goal-state v2：goals + run。没有顶层目标；每个 goal 就是一项。
+- setBy 固定 user/assistant，updatedBy 记录最近编辑者；工具来源 assistant，命令来源 user。禁止参数覆盖作者/ID。
+- add/update/delete/show 始终只通过 codemode 暴露；没有 goal_set/goal_clear 独立工具。show 只读，包括 pending、暂停及软删除查询。
+- 软删除留下 deletedAt，默认隐藏；分支上的每次状态快照就是变更历史，不另建审计框架。
+- run.ids 是当前用户授权的执行范围。纯 CRUD 不启动、不扩大范围、不重置预算；重写文本撤销该 ID 的执行范围。
+- 用户 resume 纳入当前 todo/doing，统一 20 轮；active 时重复 resume 无副作用。/goal <text> 是明确新增并执行的快捷命令，active 时只扩展范围不续预算。
+- 预算按投递后 active turn_end 消耗，失败回合也计数。blocked/done/cancelled/deleted 不再推动本轮。最后 runnable 消失时 reconcile 暂停或完成。
+- Agent 不可修改 cancelled/deleted；用户可重开 cancelled。语义授权、禁止重建取消项、删除用户项须确认依靠工具描述，不声称代码能验证同意。
+- 旧单目标迁移为 legacy ID。旧预算字段只能证明 assistant 来源；无法判断的来源/时间保持缺失，不伪造。
+- restore 只读当前分支，active -> paused，保留预算、累计用时，不计离线时间。
 
-- 未启用目标时，`goal_update` 为 hidden，不向模型添加目标提示。激活时通过 codemode 暴露，不增加独立模型工具声明。
-- `goal_show({})` 始终以 codemode 暴露，包括无目标、待投递、暂停、完成及清除后；不增加独立模型工具声明。`goal_update` 的 status 仅接受 complete/pause，不兼容错误的 show 状态设计。
-- `goal_show({})` 只读返回目标快照、设置时间、最近恢复时间（有才显示）、累计运行时间与待投递标记；时间以 ISO 8601 UTC 显示，`setAt`/`resumedAt` 随状态持久化，替换目标重置，旧记录不伪造时间；不落盘、不通知、不取消重试、不改变工具暴露策略。完成和暂停仍须通过 active 与投递屏障检查。
-- `goal_set({text})` 始终仅 codemode 暴露，空白/取消/缺少 codemode 不修改目标或投递消息；仅无目标或 complete 时可创建，active/paused/closed 及 pending 一律拒绝，用户命令仍可替换。工具描述约束为用户明确要求的多步任务，不扩展范围或权限、不用于问答讨论或预算规避；语义授权依靠 Agent 遵循描述，不声称代码能验证用户意图。
-- Agent 创建与用户命令共用 activate/steer/投递屏障。`agentTurnsRemaining` 存在表示 Agent 来源，初始 20；送达后每个 active 的 turn_end 消耗一轮（包含失败回合），归零暂停，关闭目标的自动继续和完成入口，不强行终止当前执行或其他扩展。每轮持久化，恢复分支保留预算但暂停；仅用户恢复重置 20，用户替换移除预算。goal_show 显示剩余轮次。没有额外计时器。
-- 目标状态写入 `pi-goal-state` custom entry，不进入模型上下文。恢复只读当前分支；恢复 active 为 paused，不自动运行，不计离线时间。
-- 设置与恢复共用投递路径，使用 steer 等待当前工具批次结束。唯一 `goalDelivery` 标记匹配 `message_start` 后才开放完成工具，避免旧回合完成未送达的新目标。
-- 暂停、清除不能撤回已经投递或排队的提示，也不取消当前工具。它们关闭目标自动继续和完成入口。不要声称 sendMessage 返回就代表落盘或模型已看到消息。
-- `agent_before_settle` 才是自动继续边界；尊重已有 `event.continue` 和待发送消息，避免重复提醒或抢占其他扩展的继续策略。
-- 状态菜单只用于 `ctx.mode === "tui"`；RPC/print 使用通知报告状态。菜单等待期间目标被替换或恢复后，丢弃旧菜单操作。
-- 定时器只在重试等待和打开菜单期间存在；取消、恢复及 shutdown 负责清理，不在扩展 factory 启动长期任务。
+## 投递与边界
+
+- 用户清单修改通过唯一 goalDelivery + steer 送达。匹配 message_start 前拒绝所有 Agent 写操作；读始终开放。idle 时 triggerTurn:false 落上下文但不启动。
+- 暂停/取消不会中断当前工具、撤回已经投递或排队的提示。CRUD 仍可维护暂停的清单。
+- agent_before_settle 是自动继续边界，尊重已有 event.continue / pending messages。
+- compact 成功的 session_compact 发送一条简短 pi-goal custom message，triggerTurn:false。失败不注入。
+- backtrack 成功 tool_result 设标记，整个工具批次 turn_end 追加摘要到 event.entries；不在工具未完成时发送。这样和 pi-backtrack 的零点 compaction 边界无关加载顺序，摘要留在新基线之后。失败不注入，同批最多一条。
+- 摘要用真实 item 状态 todo/doing/blocked/done/cancelled，执行状态单列，不混用 active/pause/complete 作为 item 状态。摘要本身不续预算/启动/修改清单。
+- /goal 状态使用通知，TUI/RPC/print 均可用，无后台 UI 定时器。
 
 ## 错误恢复
 
-- 连续错误最多自动重试 10 次，退避为 1、2、4、8、16、32、64、128、256、512 秒，耗尽后暂停。成功边界或显式重新激活重置预算。
-- 同一错误序列仅第一次追加 resumed 提示；之后通过 context_edit 从后续上下文排除对应失败 assistant 消息，保留原始历史、UI 和统计。
-- 重试标记只在确实返回 continuation 时设置；若请求的重试没有启动而最终 settled，暂停目标，避免看似 active 却没有后续执行。
-- 暂停、清除、替换、恢复和退出取消旧等待；旧 controller 的 finally 不得清除新 controller。
+- 连续错误最多 10 次，指数退避 1–512 秒；耗尽暂停。
+- 第一次重试追加提示，之后 context_edit 从请求上下文排除最近失败 assistant，原始历史不删。
+- retryRequested 仅返回 continuation 时置 true，agent_start 清除；最终 settled 未启动重试则暂停。
+- 用户暂停、编辑、清除、恢复、shutdown 取消等待；旧 controller finally 不得清除新 controller。
 
 ## 验证
 
-- `test/controls.test.mjs`：状态、工具暴露、投递屏障、退避预算、取消、事件组合及菜单/RPC 行为。长退避使用 mock timers，不实际等待 512 秒。
-- `test/goal.test.mjs`：计时与恢复验证、真实 SDK/codemode 完成及暂停、运行中工具后的 steer、主动中断和 provider 错误恢复。
-- 使用隔离临时目录和模拟 provider，不访问用户会话，不请求在线模型。
+- controls.test.mjs：CRUD、作者、只读、投递屏障、共享预算、软删除、状态、重试、摘要。
+- state.test.mjs：来源/时间、快照隔离、旧版本迁移、持久化校验。
+- goal.test.mjs：真实 SDK/codemode、20轮、steer、provider 重试、compact、backtrack 工具结果边界。
+- 与真实 pi-backtrack 联测（两种加载顺序、零点基线）：
+  PI_GOAL_BACKTRACK_TEST=file:///absolute/path/to/pi-backtrack/dist/index.js npm test
+- 不访问用户会话、不请求在线模型。
