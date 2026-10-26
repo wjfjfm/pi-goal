@@ -15,6 +15,60 @@ function fixture({codemode=true}={}) {
   extension(pi);
   return {handlers,tools,entries,messages,notices,statuses,ctx,run:arg=>command(arg,ctx),idle:v=>idle=v,pending:v=>pending=v,active:()=>active,state:()=>entries.at(-1)?.data};
 }
+test('agent set validates input, cancellation, dependencies and refuses replacement or reopening',async()=>{
+  const h=fixture();
+  const set=(text,signal)=>h.tools.get('goal_set').execute('set',{text},signal,undefined,h.ctx);
+  assert.equal(h.tools.get('goal_set').exposure,'codemode');
+  await assert.rejects(()=>set('  '),/blank/);
+  await assert.rejects(()=>set('task',AbortSignal.abort()),/cancelled/);
+  assert.equal(h.entries.length,0);
+  await set('  task  ');assert.equal(h.state().text,'task');
+  assert.equal(h.state().agentTurnsRemaining,20);
+  for(const change of ['active','pause','clear']){
+    if(change!=='active')await h.run(change);
+    const count=h.entries.length;
+    await assert.rejects(()=>set('replacement'),/Cannot replace/);
+    h.handlers.session_start({},h.ctx);
+    await assert.rejects(()=>set('replacement'),/Cannot replace/);
+    assert.equal(h.entries.length,count);
+  }
+  await h.run('user replacement');
+  assert.equal(h.state().agentTurnsRemaining,undefined);
+  await h.tools.get('goal_update').execute('done',{status:'complete'},undefined,undefined,h.ctx);
+  await set('new authorized task');assert.equal(h.state().agentTurnsRemaining,20);
+  const absent=fixture({codemode:false});
+  await assert.rejects(()=>absent.tools.get('goal_set').execute('set',{text:'task'},undefined,undefined,absent.ctx),/requires/);
+  assert.equal(absent.entries.length,0);
+});
+
+test('agent turn budget starts after delivery, persists, pauses at 20 and only user renews',async()=>{
+  const h=fixture();h.idle(false);
+  const set=()=>h.tools.get('goal_set').execute('set',{text:'task'},undefined,undefined,h.ctx);
+  await set();
+  await assert.rejects(set,/Cannot replace/);
+  h.handlers.turn_end({},h.ctx);assert.equal(h.state().agentTurnsRemaining,20);
+  h.handlers.message_start({message:{role:'custom',...h.messages[0]}});
+  for(let n=1;n<=20;n++){
+    h.handlers.turn_end({},h.ctx);
+    assert.equal(h.state().agentTurnsRemaining,20-n);
+    assert.equal(h.state().status,n===20?'paused':'active');
+  }
+  assert.equal(h.handlers.agent_before_settle({outcome:'completed',entries:[]},h.ctx),undefined);
+  await assert.rejects(set,/Cannot replace/);
+  h.handlers.session_start({},h.ctx);
+  assert.equal((await h.tools.get('goal_show').execute('show',{})).details.goal.agentTurnsRemaining,0);
+  await assert.rejects(set,/Cannot replace/);
+  await h.run('resume');assert.equal(h.state().agentTurnsRemaining,20);
+  h.handlers.message_start({message:{role:'custom',...h.messages.at(-1)}});
+  h.handlers.turn_end({},h.ctx);assert.equal(h.state().agentTurnsRemaining,19);
+  h.handlers.session_tree({},h.ctx);
+  assert.equal((await h.tools.get('goal_show').execute('show',{})).details.goal.agentTurnsRemaining,19);
+  await h.run('replacement');
+  for(let n=0;n<25;n++)h.handlers.turn_end({},h.ctx);
+  assert.equal(h.state().status,'active');
+  assert.equal(h.state().agentTurnsRemaining,undefined);
+});
+
 test('show returns a read-only snapshot without delivery or lifecycle side effects',async()=>{
   const h=fixture();
   const show=()=>h.tools.get('goal_show').execute('show',{});

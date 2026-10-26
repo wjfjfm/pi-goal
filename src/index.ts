@@ -79,9 +79,26 @@ export default function goalExtension(pi: ExtensionAPI) {
       if (signal?.aborted) throw new Error("Goal query cancelled.");
       const current = state.snapshot();
       const text = current
-        ? `Goal: ${current.text}\nStatus: ${current.status}\nSet time: ${current.setAt === undefined ? "Unknown (legacy record)" : new Date(current.setAt).toISOString()}${current.resumedAt === undefined ? "" : `\nResume time: ${new Date(current.resumedAt).toISOString()}`}\nRunning time: ${duration(current.elapsedMs)}${pendingGoal ? "\nAwaiting delivery." : ""}`
+        ? `Goal: ${current.text}\nStatus: ${current.status}\nSet time: ${current.setAt === undefined ? "Unknown (legacy record)" : new Date(current.setAt).toISOString()}${current.resumedAt === undefined ? "" : `\nResume time: ${new Date(current.resumedAt).toISOString()}`}\nRunning time: ${duration(current.elapsedMs)}${current.agentTurnsRemaining === undefined ? "" : `\nAgent turns remaining: ${current.agentTurnsRemaining}`}${pendingGoal ? "\nAwaiting delivery." : ""}`
         : "No goal set.";
       return { content: [{ type: "text", text }], details: { goal: current ?? null, pendingDelivery: !!pendingGoal } };
+    },
+  });
+  pi.registerTool({
+    name: "goal_set", label: "Set goal",
+    description: "Create a goal only for a multi-step task the user has explicitly requested, never for questions or discussion. Do not expand scope or permissions; required confirmations still apply. Cannot replace an active, paused or cleared goal; only the user can replace or resume it. Agent-created goals pause after 20 delivered model turns (without interrupting tools); only the user can renew the budget with /goal resume. After completion, set another goal only for a new user-requested task, not to extend the old task or evade its budget.",
+    exposure: "codemode",
+    parameters: Type.Object({ text: Type.String({ minLength: 1 }) }),
+    async execute(_id, args, signal, _onUpdate, ctx) {
+      if (signal?.aborted) throw new Error("Goal creation cancelled.");
+      const text = args.text.trim();
+      if (!text) throw new Error("Goal text must not be blank.");
+      if (pendingGoal || (state.goal && state.goal.status !== "complete")) {
+        throw new Error("Cannot replace an active, paused or cleared goal. Ask the user to use /goal <text> or /goal resume.");
+      }
+      if (!ensureCodemode(ctx)) throw new Error("Goal requires the codemode tool.");
+      activate(text, ctx, false, true);
+      return { content: [{ type: "text", text: "Goal set: active. Budget: 20 model turns after delivery. No additional permissions granted." }], details: state.snapshot() };
     },
   });
   function expose() {
@@ -141,11 +158,15 @@ export default function goalExtension(pi: ExtensionAPI) {
     const resuming = args === "resume" || args === "continue";
     if (resuming && state.goal?.status !== "paused") return ctx.ui.notify("No paused goal.", "info");
     if (!ensureCodemode(ctx)) return;
+    activate(args, ctx, resuming);
+  }
+  function activate(text: string, ctx: ExtensionContext, resuming: boolean, agent = false) {
+    uiContext = ctx;
     cancelRetry();
     const kind = resuming ? "resumed" : state.goal && state.goal.status !== "closed" ? "changed" : "set";
     pendingGoal = randomUUID();
     if (resuming) state.transition("active");
-    else state.set(args);
+    else state.set(text, agent);
     save(); expose();
     ctx.ui.notify(resuming ? "Goal active." : kind === "set" ? "Goal set: active." : "Goal changed: active.", "info");
     pi.sendMessage({ ...message(kind), details: { goalDelivery: pendingGoal } },
@@ -202,7 +223,16 @@ export default function goalExtension(pi: ExtensionAPI) {
     }
   });
   // Refresh elapsed time on activity, without a timer forcing terminal redraws.
-  pi.on("turn_end", (_event, ctx) => updateStatus(ctx));
+  pi.on("turn_end", (_event, ctx) => {
+    if (!pendingGoal && state.goal?.status === "active" && state.goal.agentTurnsRemaining !== undefined) {
+      if (state.consumeTurn()) {
+        cancelRetry(); state.transition("paused"); expose();
+        ctx.ui.notify("Goal paused: 20-turn budget exhausted. Use /goal resume to continue.", "warning");
+      }
+      save();
+    }
+    updateStatus(ctx);
+  });
   pi.on("session_start", (_event, ctx) => restore(ctx));
   pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.on("session_shutdown", () => {

@@ -50,7 +50,7 @@ test('time excludes pauses and offline time; restore validates persisted data', 
 });
 
 const model = {id:'goal-test',name:'goal-test',api:'openai-completions',provider:'goal-test',baseUrl:'http://unused.invalid',reasoning:false,input:['text'],contextWindow:100000,maxTokens:1000,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}};
-async function fixture(t, respond, extensions = []) {
+async function fixture(t, respond, extensions = [], maxRequests = 10) {
   const cwd = await mkdtemp(join(tmpdir(), 'pi-goal-test-'));
   const settingsManager = SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false}});
   let api;
@@ -63,9 +63,9 @@ async function fixture(t, respond, extensions = []) {
   const requests=[];
   session.agent.streamFunction = (_model, context) => {
     requests.push(context);
-    assert.ok(!getCurrentTools(context.messages).some(tool => ["goal_show","goal_update"].includes(tool.name)),
+    assert.ok(!getCurrentTools(context.messages).some(tool => ["goal_show","goal_update","goal_set"].includes(tool.name)),
       "goal tools must only be exposed through codemode, never as standalone model tools");
-    assert.ok(requests.length < 10, 'runaway goal loop');
+    assert.ok(requests.length < maxRequests, 'runaway goal loop');
     const response = respond(requests.length, context, api);
     const message={role:'assistant',content:response.content ?? [{type:'text',text:'done'}],api:model.api,provider:model.provider,model:model.id,usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason:response.error?'error':response.content?'toolUse':'stop',timestamp:Date.now(),...(response.error?{errorMessage:response.error}:{})};
     const stream=createAssistantMessageEventStream();
@@ -74,6 +74,27 @@ async function fixture(t, respond, extensions = []) {
   t.after(async()=>{session.dispose();await rm(cwd,{recursive:true,force:true});assert.deepEqual(errors,[]);});
   return {session,requests,api,sm};
 }
+test('agent creates a goal through codemode with delivery gating and can complete it',async t=>{
+  const h=await fixture(t,(n,context)=>{
+    if(n===1)return {content:[{type:'toolCall',name:'codemode',id:'set',arguments:{code:'text(await tools.goal_set({text:"authorized task"})); try { await tools.goal_update({status:"complete"}); } catch (e) { text("blocked: "+e.message); }'}}]};
+    if(n===2){
+      const result=context.messages.find(m=>m.role==='toolResult'&&m.toolCallId==='set');
+      assert.notEqual(result.isError,true);
+      assert.match(JSON.stringify(result.content),/Goal set: active/);
+      assert.match(JSON.stringify(result.content),/blocked:/);
+      assert.match(JSON.stringify(context.messages),/goal set: authorized task/);
+      return complete;
+    }
+    return {};
+  });
+  h.api.setActiveTools([...h.api.getActiveTools(),'codemode']);
+  await h.session.prompt('Please carry out this multi-step task');await settled(h.session);
+  assert.equal(h.requests.length,3);
+  const goal=h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data;
+  assert.equal(goal.status,'complete');
+  assert.equal(goal.agentTurnsRemaining,20);
+});
+
 const complete = {content:[{type:'toolCall',name:'codemode',id:'complete',arguments:{code:'text(await tools.goal_update({status:"complete"}));'}}]};
 async function settled(session) {
   // Slash commands queue a turn rather than awaiting it.
@@ -83,6 +104,16 @@ async function settled(session) {
   }
   throw new Error('Agent did not settle');
 }
+
+test('agent-created goal automatically pauses after 20 model turns in the real runtime',async t=>{
+  const h=await fixture(t,n=>n===1?{content:[{type:'toolCall',name:'codemode',id:'set',arguments:{code:'text(await tools.goal_set({text:"bounded task"}));'}}]}:{},[],25);
+  h.api.setActiveTools([...h.api.getActiveTools(),'codemode']);
+  await h.session.prompt('Please execute this multi-step task');await settled(h.session);
+  assert.equal(h.requests.length,21);
+  const goal=h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data;
+  assert.equal(goal.status,'paused');assert.equal(goal.agentTurnsRemaining,0);
+  assert.equal(h.api.getAllTools().find(t=>t.name==='goal_update').exposure,'hidden');
+});
 
 test('disabled goal is invisible; active goal uses real codemode and repeats until completed', async t => {
   const h = await fixture(t, (n, context) => {

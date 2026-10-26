@@ -11,6 +11,8 @@
 - 未启用目标时，`goal_update` 为 hidden，不向模型添加目标提示。激活时通过 codemode 暴露，不增加独立模型工具声明。
 - `goal_show({})` 始终以 codemode 暴露，包括无目标、待投递、暂停、完成及清除后；不增加独立模型工具声明。`goal_update` 的 status 仅接受 complete/pause，不兼容错误的 show 状态设计。
 - `goal_show({})` 只读返回目标快照、设置时间、最近恢复时间（有才显示）、累计运行时间与待投递标记；时间以 ISO 8601 UTC 显示，`setAt`/`resumedAt` 随状态持久化，替换目标重置，旧记录不伪造时间；不落盘、不通知、不取消重试、不改变工具暴露策略。完成和暂停仍须通过 active 与投递屏障检查。
+- `goal_set({text})` 始终仅 codemode 暴露，空白/取消/缺少 codemode 不修改目标或投递消息；仅无目标或 complete 时可创建，active/paused/closed 及 pending 一律拒绝，用户命令仍可替换。工具描述约束为用户明确要求的多步任务，不扩展范围或权限、不用于问答讨论或预算规避；语义授权依靠 Agent 遵循描述，不声称代码能验证用户意图。
+- Agent 创建与用户命令共用 activate/steer/投递屏障。`agentTurnsRemaining` 存在表示 Agent 来源，初始 20；送达后每个 active 的 turn_end 消耗一轮（包含失败回合），归零暂停，关闭目标的自动继续和完成入口，不强行终止当前执行或其他扩展。每轮持久化，恢复分支保留预算但暂停；仅用户恢复重置 20，用户替换移除预算。goal_show 显示剩余轮次。没有额外计时器。
 - 目标状态写入 `pi-goal-state` custom entry，不进入模型上下文。恢复只读当前分支；恢复 active 为 paused，不自动运行，不计离线时间。
 - 设置与恢复共用投递路径，使用 steer 等待当前工具批次结束。唯一 `goalDelivery` 标记匹配 `message_start` 后才开放完成工具，避免旧回合完成未送达的新目标。
 - 暂停、清除不能撤回已经投递或排队的提示，也不取消当前工具。它们关闭目标自动继续和完成入口。不要声称 sendMessage 返回就代表落盘或模型已看到消息。
