@@ -4,6 +4,18 @@
 - 小型扩展：state.ts 管清单/运行状态，index.ts 管工具、命令、Pi 事件。
 - Pi 1.3.0，Node.js ≥22.19.0；npm test 构建并运行隔离的模拟 provider + 真实 SDK/codemode 测试。
 
+## 用户入口与 Agent 工具
+
+- 用户只需 `/goal <text>`、`/goal`、`/goal pause`、`/goal resume`、`/goal clear`。不提供 add/update/delete/parent 参数管理入口；旧语法仅提示用自然语言，不能误作为新目标启动。原 show/parse/continue/exit 别名仍兼容但不宣传。
+- `/goal` 的 summary 不显示 ID 或 Authorized IDs；模型注入使用 internal summary 保留这些信息，指令消息 display:false，不向用户展开内部操作说明。compact/backtrack 简短摘要仍 display:true；codemode 返回的数据结构不变。
+- 用户通过自然语言让 Agent 调整计划；工具调用仍记录 assistant 来源，不伪装为用户直接修改。不为自然语言请求添加自动解析器。
+- Agent 自主管理多级 TODO，仅通过 codemode：
+  - `goal_add({text,parentId?})`：新增，省略 parentId 为根。
+  - `goal_show({id?})`：查询全表或单项，含来源、父子关系、执行范围及模块预算。
+  - `goal_update({id,text?,status?})`：状态为 todo/doing/blocked/done/cancelled。
+  - `goal_delete({id})`：软删除；有未删除子项时拒绝。
+- 工具 CRUD 不直接启动/恢复执行；setBy 固定 user/assistant，updatedBy 记录最近实际修改者。
+
 ## 清单与运行
 
 - 持久化 pi-goal-state v2：goals + run。每个 goal 就是一项，可选 parentId 组织多级树；缺省是根。旧 v2 无需迁移。
@@ -16,13 +28,13 @@
 - run.ids 是当前用户授权的执行范围。纯 CRUD 不启动、不扩大范围；实际 goal 变更会补满模块预算；重写文本撤销该 ID 的执行范围。
 - 用户 resume 纳入当前 todo/doing，无总轮数上限；active 时重复 resume 无副作用。/goal <text> 是明确新增并执行的快捷命令，active 时扩展范围，并因新增 goal 补满预算，但不重置连续运行周期。
 - turn_end 仅持久化累计用时及处理摘要，不做轮数限制。blocked/done/cancelled/deleted 不再推动本轮。最后 runnable 消失时 reconcile 暂停或完成。
-- Agent 不可修改 cancelled/deleted；用户可重开 cancelled。语义授权、禁止重建取消项、删除用户项须确认依靠工具描述，不声称代码能验证同意。
+- Agent 不可修改 cancelled/deleted；用户通过简单命令控制整体执行，不再通过 ID 重开单项。语义授权、禁止重建取消项、删除用户项须确认依靠工具描述，不声称代码能验证同意。
 - 旧单目标迁移为 legacy ID。旧预算字段只能证明 assistant 来源；无法判断的来源/时间保持缺失，不伪造。
 - restore 只读当前分支，active -> paused，保留累计用时，不计离线时间。
 
 ## 投递与边界
 
-- 用户清单修改通过唯一 goalDelivery + steer 送达。匹配 message_start 前拒绝所有 Agent 写操作；读始终开放。idle 时 triggerTurn:false 落上下文但不启动。
+- 用户新增目标、恢复、clear 通过唯一 goalDelivery + steer 送达。匹配 message_start 前拒绝所有 Agent 写操作；读始终开放。idle 时 triggerTurn:false 落上下文但不启动。
 - 暂停/取消不会中断当前工具、撤回已经投递或排队的提示。CRUD 仍可维护暂停的清单。
 - agent_before_settle 是自动继续边界，尊重已有 event.continue / pending messages。
 - compact 成功的 session_compact 发送一条简短 pi-goal custom message，triggerTurn:false。失败不注入。
@@ -48,7 +60,7 @@
 - 连续错误最多 10 次，指数退避 1–512 秒；耗尽暂停。
 - 第一次重试追加提示，之后 context_edit 从请求上下文排除最近失败 assistant，原始历史不删。
 - retryRequested 仅返回 continuation 时置 true，agent_start 清除；最终 settled 未启动重试则暂停。
-- 用户暂停、编辑、清除、恢复、shutdown 取消等待；旧 controller finally 不得清除新 controller。
+- 用户暂停、新增目标、清除、恢复、shutdown 取消等待；旧 controller finally 不得清除新 controller。
 
 ## 验证
 

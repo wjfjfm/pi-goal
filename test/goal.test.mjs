@@ -7,11 +7,11 @@ import { createAgentSession, createCodemodeExtension, DefaultResourceLoader, Ses
 import { createAssistantMessageEventStream, getCurrentTools } from '@earendil-works/pi-ai';
 import extension from '../dist/index.js';
 const model = {id:'goal-test',name:'goal-test',api:'openai-completions',provider:'goal-test',baseUrl:'http://unused.invalid',reasoning:false,input:['text'],contextWindow:100000,maxTokens:1000,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}};
-async function fixture(t, respond, extensions = [], maxRequests = 10, goalFirst = false) {
+async function fixture(t, respond, extensions = [], maxRequests = 10, goalFirst = false, seed = false) {
   const cwd = await mkdtemp(join(tmpdir(), 'pi-goal-test-'));
   const settingsManager = SettingsManager.inMemory({compaction:{enabled:false,keepRecentTokens:1},retry:{enabled:false}});
   let api;
-  const loader = new DefaultResourceLoader({cwd,agentDir:join(cwd,'agent'),settingsManager,noExtensions:true,noSkills:true,noContextFiles:true,extensionFactories:[createCodemodeExtension({models:false}),...(goalFirst?[extension,...extensions]:[...extensions,extension]),pi => {api=pi;pi.registerProvider('goal-test',{apiKey:'dummy',api:model.api,baseUrl:model.baseUrl,models:[model]});}]});
+  const loader = new DefaultResourceLoader({cwd,agentDir:join(cwd,'agent'),settingsManager,noExtensions:true,noSkills:true,noContextFiles:true,extensionFactories:[...(seed?[seedPlan]:[]),createCodemodeExtension({models:false}),...(goalFirst?[extension,...extensions]:[...extensions,extension]),pi => {api=pi;pi.registerProvider('goal-test',{apiKey:'dummy',api:model.api,baseUrl:model.baseUrl,models:[model]});}]});
   await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
   const sm = SessionManager.inMemory(cwd);
   const { session } = await createAgentSession({cwd,agentDir:join(cwd,'agent'),settingsManager,resourceLoader:loader,sessionManager:sm,model});
@@ -43,6 +43,7 @@ async function settled(session) {
 
 const code=code=>({content:[{type:'toolCall',name:'codemode',id:'call',arguments:{code}}]});
 const finish=code('const s=JSON.parse(await tools.goal_show({})); for(const g of s.goals) if(s.run.ids.includes(g.id)) text(await tools.goal_update({id:g.id,status:"done"}));');
+const seedPlan=pi=>pi.on('session_start',()=>pi.appendEntry('pi-goal-state',{version:2,goals:[{id:'seed',text:'retained task',status:'todo',setBy:'user'}],run:null}));
 const state=h=>h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1)?.data;
 test('real codemode creates multilevel goals without starting a run',async t=>{
   const h=await fixture(t,n=>n===1?code('const root=JSON.parse(await tools.goal_add({text:"root"})); const child=JSON.parse(await tools.goal_add({text:"child",parentId:root.id})); text(await tools.goal_add({text:"grandchild",parentId:child.id})); text(await tools.goal_show({}));'):{});
@@ -97,15 +98,15 @@ test('real tool-driven execution can exceed twenty model turns',async t=>{
   assert.equal(h.requests.length,27);
   assert.equal(state(h).run.status,'complete');
 });
-test('blocked list pauses; editing to todo does not resume until user requests',async t=>{
-  const h=await fixture(t,n=>n===1?code('const s=JSON.parse(await tools.goal_show({})); text(await tools.goal_update({id:s.goals[0].id,status:"blocked"}));'):n===3?finish:{});
+test('agent updates blocked plan on natural-language request; only user resume starts execution',async t=>{
+  const update=status=>code('const s=JSON.parse(await tools.goal_show({})); text(await tools.goal_update({id:s.goals[0].id,status:"'+status+'"}));');
+  const h=await fixture(t,n=>n===1?update('blocked'):n===3?update('todo'):n===5?finish:{});
   await h.session.prompt('/goal wait for input');await settled(h.session);
   assert.equal(state(h).run.status,'paused');
-  const id=state(h).goals[0].id;
-  await h.session.prompt('/goal update '+id+' todo');await settled(h.session);
-  assert.equal(state(h).run.status,'paused');assert.equal(h.requests.length,2);
+  await h.session.prompt('The missing input is ready; mark the task ready to do.');await settled(h.session);
+  assert.equal(state(h).run.status,'paused');assert.equal(h.requests.length,4);
   await h.session.prompt('/goal resume');await settled(h.session);
-  assert.equal(state(h).run.status,'complete');assert.equal(h.requests.length,4);
+  assert.equal(state(h).run.status,'complete');assert.equal(h.requests.length,6);
 });
 test('user edits during a tool batch reject stale writes and arrive before next request',async t=>{
   let release,entered;
@@ -119,13 +120,13 @@ test('user edits during a tool batch reject stale writes and arrive before next 
   await h.session.prompt('/goal original');
   await started;
   const id=state(h).goals[0].id;
-  await h.session.prompt('/goal update '+id+' cancelled');
+  await h.session.prompt('/goal clear');
   assert.equal(h.requests.length,1);release();await settled(h.session);
   assert.equal(state(h).goals[0].status,'cancelled');
   assert.equal(h.requests.length,2);
   const msgs=h.requests[1].messages;
   const result=msgs.findIndex(m=>m.role==='toolResult'&&m.toolCallId==='hold');
-  const change=msgs.findIndex(m=>m.role==='user'&&JSON.stringify(m.content).includes('Goals changed by user'));
+  const change=msgs.findIndex(m=>m.role==='user'&&JSON.stringify(m.content).includes('Goals cancelled by user'));
   assert.ok(change>result && result>=0);
 });
 test('provider retry retains errors, then completes; abort stops retry',async t=>{
@@ -146,8 +147,7 @@ test('aborting real retry pauses execution',async t=>{
 test('manual compact injects digest without starting a turn or changing run state',async t=>{
   const h=await fixture(t,()=>({}),[
     pi=>pi.on('session_before_compact',event=>({compaction:{summary:'Test summary',firstKeptEntryId:event.preparation.firstKeptEntryId,tokensBefore:1}})),
-  ]);
-  await h.session.prompt('/goal add retained task');
+  ],10,false,true);
   await h.session.prompt('hello');await settled(h.session);
   await h.session.prompt('more context');await settled(h.session);
   const before=JSON.stringify(state(h));
@@ -163,8 +163,7 @@ test('manual compact injects digest without starting a turn or changing run stat
 test('actual pi-backtrack zero reset retains goal digest in either extension order', {skip:!process.env.PI_GOAL_BACKTRACK_TEST},async t=>{
   const {default:backtrack}=await import(process.env.PI_GOAL_BACKTRACK_TEST);
   for(const goalFirst of [false,true])await t.test(String(goalFirst),async t=>{
-    const h=await fixture(t,n=>n===1?{content:[{type:'toolCall',name:'backtrack',id:'bt',arguments:{checkpoint:0,message:'Continue pending tasks.'}}]}:{},[backtrack],10,goalFirst);
-    await h.session.prompt('/goal add retained task');
+    const h=await fixture(t,n=>n===1?{content:[{type:'toolCall',name:'backtrack',id:'bt',arguments:{checkpoint:0,message:'Continue pending tasks.'}}]}:{},[backtrack],10,goalFirst,true);
     await h.session.prompt('Backtrack then continue');await settled(h.session);
     assert.equal(h.requests.length,2);
     assert.match(JSON.stringify(h.requests[1].messages),/goal status: 1 todo/);
@@ -176,8 +175,7 @@ test('actual pi-backtrack zero reset retains goal digest in either extension ord
 test('successful backtrack result appends a persisted digest at turn boundary',async t=>{
   const h=await fixture(t,n=>n===1?{content:[{type:'toolCall',name:'backtrack',id:'bt',arguments:{}}]}:{},[
     pi=>pi.registerTool({name:'backtrack',label:'Backtrack',description:'test successful boundary tool',parameters:{type:'object',properties:{}},async execute(){return {content:[{type:'text',text:'Backtracked.'}],details:{status:'applied'}};}}),
-  ]);
-  await h.session.prompt('/goal add retained task');
+  ],10,false,true);
   await h.session.prompt('Backtrack');await settled(h.session);
   const digests=h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('[goal status:'));
   assert.equal(digests.length,1);

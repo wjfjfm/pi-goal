@@ -19,19 +19,23 @@ function fixture({codemode=true}={}) {
 const call=(h,name,args={},signal)=>h.tools.get(name).execute('test',args,signal,undefined,h.ctx);
 const show=h=>call(h,'goal_show').then(r=>r.details);
 const boundary={outcome:'completed',entries:[]};
-test('parentId supports assistant/user children, ordered queries and indented display',async()=>{
+test('agent manages hierarchy while user display hides internal IDs',async()=>{
   const h=fixture();await h.run('root');
   const id=h.state().goals[0].id;
   const child=(await call(h,'goal_add',{text:'child',parentId:id})).details;
-  await h.run('add --parent '+child.id+' grandchild');
+  await call(h,'goal_add',{text:'grandchild',parentId:child.id});
   const before=h.entries.length;
   const list=await show(h);
   assert.equal(list.goals[1].parentId,id);
   assert.equal(list.goals[2].parentId,child.id);
-  assert.equal(list.goals[2].setBy,'user');
+  assert.equal(list.goals[2].setBy,'assistant');
   assert.equal('turnsRemaining' in list.run,false);assert.deepEqual(list.run.ids,[id]);
   await h.run('show');
-  assert.ok(h.notices.at(-1)[0].includes('    [todo] '+list.goals[2].id));
+  assert.ok(h.notices.at(-1)[0].includes('    [todo] grandchild'));
+  for(const g of list.goals)assert.ok(!h.notices.at(-1)[0].includes(g.id));
+  assert.ok(!h.notices.at(-1)[0].includes('Authorized IDs'));
+  assert.ok(h.messages[0].content.includes(id));
+  assert.equal(h.messages[0].display,false,'internal instructions stay out of the user transcript');
   assert.equal(h.entries.length,before);
   await assert.rejects(()=>call(h,'goal_delete',{id}),/child goals/);
   await assert.rejects(()=>call(h,'goal_add',{text:'bad',parentId:'missing'}),/Unknown/);
@@ -48,13 +52,13 @@ test('CRUD is codemode-only, authorship is immutable, add does not execute',asyn
   const g=(await call(h,'goal_add',{text:' task '})).details;
   assert.equal(g.setBy,'assistant');assert.equal(g.text,'task');
   assert.equal(h.state().run,null);assert.equal(h.messages.length,0);
-  await h.run('update '+g.id+' text user edit');
+  await call(h,'goal_update',{id:g.id,text:'edited plan'});
   const updated=(await show(h)).goals[0];
-  assert.equal(updated.setBy,'assistant');assert.equal(updated.updatedBy,'user');
+  assert.equal(updated.setBy,'assistant');assert.equal(updated.updatedBy,'assistant');
   await call(h,'goal_update',{id:g.id,status:'doing',setBy:'user'});
   assert.equal(h.state().goals[0].setBy,'assistant');
   assert.equal(h.state().run,null);
-  await h.run('add user task');
+  await h.run('user task');
   assert.equal(h.state().goals[1].setBy,'user');
   await assert.rejects(()=>call(h,'goal_update',{id:g.id}),/Specify/);
   await assert.rejects(()=>call(h,'goal_update',{id:g.id,text:' '}),/blank/);
@@ -70,7 +74,7 @@ test('soft deletion hides the item but keeps its author and history',async()=>{
 });
 test('queries are read-only, including paused, deleted and pending states',async()=>{
   const h=fixture();await h.run('work');h.idle(false);
-  await h.run('add later');
+  await h.run('clear');
   const before=[h.entries.length,h.messages.length,h.notices.length];
   const s=await show(h);
   assert.equal(s.pendingDelivery,true);
@@ -79,17 +83,27 @@ test('queries are read-only, including paused, deleted and pending states',async
   assert.equal((await show(h)).run.ids.length,1);
   assert.deepEqual([h.entries.length,h.messages.length,h.notices.length],before);
 });
-test('user edit delivery bars stale writes; cancelled tasks cannot be revived',async()=>{
+test('user clear delivery bars stale writes and cancelled tasks cannot be revived',async()=>{
   const h=fixture();await h.run('work');
   const id=h.state().goals[0].id;
-  h.idle(false);await h.run('update '+id+' cancelled');
+  h.idle(false);await h.run('clear');
   await assert.rejects(()=>call(h,'goal_update',{id,status:'done'}),/awaiting delivery/);
   h.handlers.message_start({message:{role:'custom',...h.messages.at(-1)}});
   await assert.rejects(()=>call(h,'goal_update',{id,status:'done'}),/Cancelled/);
-  await h.run('update '+id+' todo');
-  h.handlers.message_start({message:{role:'custom',...h.messages.at(-1)}});
-  await call(h,'goal_update',{id,status:'doing'});
-  assert.notEqual(h.state().run.status,'active');
+  assert.equal(h.state().run.status,'paused');
+});
+test('retired CRUD commands are rejected without modifying goals or starting execution',async()=>{
+  const h=fixture();
+  for(const args of ['add task','update id done','delete id','add','update','delete','add --parent id child','--parent id child','--parent-id=id child']){
+    await h.run(args);
+    assert.equal(h.entries.length,0);assert.equal(h.messages.length,0);
+    assert.match(h.notices.at(-1)[0],/natural language/);
+  }
+  await h.run('user goal');
+  const before=JSON.stringify(h.state()),messages=h.messages.length;
+  await h.run('delete '+h.state().goals[0].id);
+  assert.equal(JSON.stringify(h.state()),before);assert.equal(h.messages.length,messages);
+  await h.run('');assert.match(h.notices.at(-1)[0],/user goal/);
 });
 const budget=async h=>(await show(h)).continuationBudget.remaining;
 const inject=h=>h.handlers.agent_before_settle(boundary,h.ctx);
@@ -104,7 +118,7 @@ test('module budget pauses on tenth short reminder interval, not tool turns',asy
   const id=h.state().goals[0].id;
   await call(h,'goal_update',{id,text:' first ',status:'todo'}); // No actual change.
   await assert.rejects(()=>call(h,'goal_update',{id,text:' '}),/blank/);
-  await h.run('update '+id+' todo');
+  await h.run('show');
   await show(h);await h.run('resume');
   h.handlers.session_compact({},h.ctx);
   h.handlers.tool_result({toolName:'backtrack',isError:false});
@@ -123,10 +137,7 @@ test('any actual goal mutation refills the one shared budget without starting ex
     (h,id)=>call(h,'goal_update',{id,status:'doing'}),
     (h,id)=>call(h,'goal_update',{id,text:'changed'}),
     (h,id)=>call(h,'goal_delete',{id}),
-    (h,id)=>h.run('add new'),
-    (h,id)=>h.run('update '+id+' done'),
-    (h,id)=>h.run('update '+id+' text edited'),
-    (h,id)=>h.run('delete '+id),
+    (h,id)=>h.run('new user goal'),
   ];
   for(const change of changes){
     const h=fixture();await h.run('work');
@@ -238,7 +249,7 @@ test('continuations compose and missing codemode prevents starting',async()=>{
   assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
   const absent=fixture({codemode:false});await absent.run('work');
   assert.equal(absent.entries.length,0);
-  await absent.run('add planning only');assert.equal(absent.state().run,null);
+  await call(absent,'goal_add',{text:'planning only'});assert.equal(absent.state().run,null);
 });
 test('10 exponential retries preserve failed history and stop; show does not cancel retry',async t=>{
   t.mock.timers.enable({apis:['setTimeout']});
@@ -256,7 +267,7 @@ test('10 exponential retries preserve failed history and stop; show does not can
   assert.equal(h.state().run.status,'paused');
 });
 test('retry cancellation on pause, edits, clear, restore and shutdown',async()=>{
-  for(const action of ['pause','add later','clear','restore','shutdown']){
+  for(const action of ['pause','new user goal','clear','restore','shutdown']){
     const h=fixture();await h.run('work');
     const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
     if(action==='restore')h.handlers.session_start({},h.ctx);
@@ -266,7 +277,7 @@ test('retry cancellation on pause, edits, clear, restore and shutdown',async()=>
   }
 });
 test('compact and successful backtrack inject one small digest without starting execution',async()=>{
-  const h=fixture();await h.run('add task');
+  const h=fixture();await call(h,'goal_add',{text:'task'});
   const before=h.entries.length;
   h.handlers.session_compact({},h.ctx);
   assert.match(h.messages.at(-1).content,/^\[goal status: 1 todo/);

@@ -29,9 +29,9 @@ export default function goalExtension(pi: ExtensionAPI) {
     return remaining === 0;
   }
   function cancelRetry() { retryAbort?.abort(); retryAbort=undefined; retryCount=0; retryRequested=false; }
-  function summary() {
+  function summary(internal = false) {
     const r=state.snapshot().run;
-    return `${state.outline().map(({goal:g,depth})=>`${"  ".repeat(depth)}[${g.status}] ${g.id} ${g.text} (set by ${g.setBy ?? "unknown (legacy)"})`).join("\n") || "No goals."}\nRun: ${r?.status ?? "idle"}; running time: ${duration(state.elapsed())}; repeat budget: ${remaining}/${CONTINUATION_BUDGET}${r ? `\nAuthorized IDs: ${r.ids.join(", ")}` : ""}`;
+    return `${state.outline().map(({goal:g,depth})=>`${"  ".repeat(depth)}[${g.status}] ${internal ? `${g.id} ` : ""}${g.text} (set by ${g.setBy ?? "unknown (legacy)"})`).join("\n") || "No goals."}\nRun: ${r?.status ?? "idle"}; running time: ${duration(state.elapsed())}; repeat budget: ${remaining}/${CONTINUATION_BUDGET}${internal && r ? `\nAuthorized IDs: ${r.ids.join(", ")}` : ""}`;
   }
   function updateStatus(ctx=uiContext) {
     if (ctx?.hasUI) ctx.ui.setStatus(MESSAGE,state.goals.length ? `Goals: ${state.visible().length} · ${state.run?.status ?? "idle"} (${duration(state.elapsed())})` : undefined);
@@ -42,7 +42,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     pi.appendEntry(ENTRY,state.snapshot()); updateStatus();
   }
   function message(kind: string) {
-    return {customType:MESSAGE,content:`Goals ${kind}:\n${summary()}\n\nUse codemode tools.goal_show({}), goal_add({text,parentId?}), goal_update({id,text?,status?}), goal_delete({id}). Status: todo/doing/blocked/done/cancelled. Work only on authorized IDs while the run is active. New or reworded items require user /goal resume to enter execution scope. Listing or doing is not permission. Do not expand scope, bypass confirmations, or recreate cancelled tasks. Mark blocked when awaiting user input.`,display:true};
+    return {customType:MESSAGE,content:`Goals ${kind}:\n${summary(true)}\n\nUse codemode tools.goal_show({}), goal_add({text,parentId?}), goal_update({id,text?,status?}), goal_delete({id}). Status: todo/doing/blocked/done/cancelled. Work only on authorized IDs while the run is active. New or reworded items require user /goal resume to enter execution scope. Listing or doing is not permission. Do not expand scope, bypass confirmations, or recreate cancelled tasks. Mark blocked when awaiting user input.`,display:false};
   }
   function digest() {
     const goals=state.visible(), count=(s: Status)=>goals.filter(g=>g.status===s).length;
@@ -99,30 +99,18 @@ export default function goalExtension(pi: ExtensionAPI) {
       for (const g of state.visible()) if (!["done","cancelled"].includes(g.status)) state.update(g.id,{status:"cancelled"},"user");
       save(); deliver("cancelled by user",false); return;
     }
-    const match=/^(add|delete|update)\s+([\s\S]+)$/.exec(args);
-    if (match) {
-      const [,op,rest]=match;
-      if (op==="add") {
-        const child=/^--parent\s+(\S+)\s+([\s\S]+)$/.exec(rest);
-        if (/^--parent(?:\s|$)/.test(rest) && !child) throw new Error("Use /goal add --parent <id> <text>.");
-        state.add(child ? child[2] : rest,"user",child?.[1]);
-      }
-      else if (op==="delete") state.delete(rest.trim(),"user");
-      else {
-        const edit=/^(\S+)\s+(todo|doing|blocked|done|cancelled|text)(?:\s+([\s\S]+))?$/.exec(rest);
-        if (!edit || (edit[2]==="text" && !edit[3]) || (edit[2]!=="text" && edit[3])) throw new Error("Use /goal update <id> <status> or /goal update <id> text <text>.");
-        state.update(edit[1],edit[2]==="text" ? {text:edit[3]} : {status:edit[2] as Status},"user");
-      }
-      cancelRetry(); reconcile(); save(); deliver("changed by user",false); return;
+    // Reject retired CRUD syntax rather than accidentally executing it as a new goal.
+    if (/^(?:add|update|delete)(?:\s|$)/.test(args) || /(?:^|\s)--parent(?:-id)?(?:\s|=|$)/.test(args)) {
+      ctx.ui.notify("Describe plan changes to the agent in natural language. Use /goal <text> to start a goal, /goal to view it, or /goal pause / resume / clear.","info");
+      return;
     }
-    if (["add","delete","update"].includes(args)) throw new Error("Missing goal text or ID.");
     if (!ensureCodemode(ctx)) return;
     const g=state.add(args,"user");
     if (state.run?.status==="active") state.run={...state.run,ids:[...state.run.ids,g.id]};
     else { state.start(); resetContinuation(); }
     cancelRetry(); save(); deliver("added by user",true);
   }
-  pi.registerCommand("goal",{description:"Shared TODOs: add [--parent <id>] <text>, update <id> <status>|text <text>, delete <id>, show, pause, resume; <text> adds and starts.",
+  pi.registerCommand("goal",{description:"Set a goal with <text>, view it with /goal, or pause / resume / clear. Ask the agent to organize and edit the plan.",
     async handler(args,ctx) { try { await action(args.trim(),ctx); } catch(error) { ctx.ui.notify(error instanceof Error ? error.message : String(error),"error"); } }});
   function restore(ctx: ExtensionContext) {
     cancelRetry(); resetContinuation(); uiContext=ctx; pendingGoal=undefined; afterBacktrack=false;
