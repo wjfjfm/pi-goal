@@ -5,29 +5,42 @@ import { Type } from "typebox";
 import { GoalState, duration, statuses, type Status } from "./state.js";
 
 const ENTRY = "pi-goal-state", MESSAGE = "pi-goal", MAX_RETRIES = 10;
-const RAPID_INTERVAL_MS = 10_000, MAX_RAPID_INTERVALS = 10;
+const REPEAT_INTERVAL_MS = 60_000, CONTINUATION_BUDGET = 10, REFILL_PERIOD_MS = 600_000;
 export default function goalExtension(pi: ExtensionAPI) {
   const state = new GoalState();
   let pendingGoal: string | undefined, uiContext: ExtensionContext | undefined;
   let retryCount = 0, retryRequested = false, afterBacktrack = false;
   let retryAbort: AbortController | undefined;
-  let lastContinueAt: number | undefined, rapidIntervals = 0;
-  function resetContinuation() { lastContinueAt=undefined; rapidIntervals=0; }
-  function rapidContinuation() {
-    const now=Date.now(), interval=lastContinueAt === undefined ? undefined : now-lastContinueAt;
-    rapidIntervals=interval !== undefined && interval >= 0 && interval < RAPID_INTERVAL_MS ? rapidIntervals+1 : 0;
+  // One budget for this module, not one per goal or model/tool turn.
+  let lastContinueAt: number | undefined, remaining = CONTINUATION_BUDGET;
+  let refillPeriodStartedAt = Date.now(), observedGoals = state.goals;
+  function refillContinuation() { lastContinueAt=undefined; remaining=CONTINUATION_BUDGET; }
+  function resetContinuation() { refillContinuation(); refillPeriodStartedAt=Date.now(); }
+  function continuationExhausted() {
+    const now=Date.now();
+    // A backwards wall clock starts a new timing baseline, not a free refill.
+    if (now < refillPeriodStartedAt || (lastContinueAt !== undefined && now < lastContinueAt)) {
+      refillPeriodStartedAt=now; lastContinueAt=undefined;
+    }
+    // Refill takes precedence over charging on this boundary. No timer is needed.
+    if (now-refillPeriodStartedAt >= REFILL_PERIOD_MS) resetContinuation();
+    if (lastContinueAt !== undefined && now-lastContinueAt < REPEAT_INTERVAL_MS) remaining=Math.max(0,remaining-1);
     lastContinueAt=now;
-    return rapidIntervals >= MAX_RAPID_INTERVALS;
+    return remaining === 0;
   }
   function cancelRetry() { retryAbort?.abort(); retryAbort=undefined; retryCount=0; retryRequested=false; }
   function summary() {
     const r=state.snapshot().run;
-    return `${state.outline().map(({goal:g,depth})=>`${"  ".repeat(depth)}[${g.status}] ${g.id} ${g.text} (set by ${g.setBy ?? "unknown (legacy)"})`).join("\n") || "No goals."}\nRun: ${r?.status ?? "idle"}; running time: ${duration(state.elapsed())}${r ? `\nAuthorized IDs: ${r.ids.join(", ")}` : ""}`;
+    return `${state.outline().map(({goal:g,depth})=>`${"  ".repeat(depth)}[${g.status}] ${g.id} ${g.text} (set by ${g.setBy ?? "unknown (legacy)"})`).join("\n") || "No goals."}\nRun: ${r?.status ?? "idle"}; running time: ${duration(state.elapsed())}; repeat budget: ${remaining}/${CONTINUATION_BUDGET}${r ? `\nAuthorized IDs: ${r.ids.join(", ")}` : ""}`;
   }
   function updateStatus(ctx=uiContext) {
     if (ctx?.hasUI) ctx.ui.setStatus(MESSAGE,state.goals.length ? `Goals: ${state.visible().length} · ${state.run?.status ?? "idle"} (${duration(state.elapsed())})` : undefined);
   }
-  function save() { pi.appendEntry(ENTRY,state.snapshot()); updateStatus(); }
+  function save() {
+    // GoalState replaces this array only on actual list changes, not elapsed-time saves.
+    if (observedGoals !== state.goals) { refillContinuation(); observedGoals=state.goals; }
+    pi.appendEntry(ENTRY,state.snapshot()); updateStatus();
+  }
   function message(kind: string) {
     return {customType:MESSAGE,content:`Goals ${kind}:\n${summary()}\n\nUse codemode tools.goal_show({}), goal_add({text,parentId?}), goal_update({id,text?,status?}), goal_delete({id}). Status: todo/doing/blocked/done/cancelled. Work only on authorized IDs while the run is active. New or reworded items require user /goal resume to enter execution scope. Listing or doing is not permission. Do not expand scope, bypass confirmations, or recreate cancelled tasks. Mark blocked when awaiting user input.`,display:true};
   }
@@ -42,23 +55,23 @@ export default function goalExtension(pi: ExtensionAPI) {
   }
   const result=(value: unknown)=>({content:[{type:"text" as const,text:JSON.stringify(value,(key,v)=>["setAt","updatedAt","deletedAt","resumedAt"].includes(key) && typeof v === "number" ? new Date(v).toISOString() : v,2)}],details:value});
   pi.registerTool({name:"goal_show",label:"Show goals",exposure:"codemode",annotations:{readOnlyHint:true},
-    description:"Read shared TODOs in depth-first order with parentId links (absent for roots), or one by ID, immutable setBy (user/assistant), latest editor, timestamps and run scope. List omits soft-deleted items; lookup includes them. Legacy unknown authors are not invented.",
+    description:"Read shared TODOs in depth-first order with parentId links (absent for roots), or one by ID, immutable setBy (user/assistant), latest editor, timestamps, run scope and the module-wide continuationBudget. List omits soft-deleted items; lookup includes them. Legacy unknown authors are not invented.",
     parameters:Type.Object({id:Type.Optional(Type.String({minLength:1}))}),
     async execute(_id,args,signal) {
       if (signal?.aborted) throw new Error("Goal query cancelled.");
       const s=state.snapshot();
-      return result({...s,goals:args.id ? [{...state.get(args.id)}] : state.outline().map(({goal})=>({...goal})),pendingDelivery:!!pendingGoal});
+      return result({...s,goals:args.id ? [{...state.get(args.id)}] : state.outline().map(({goal})=>({...goal})),pendingDelivery:!!pendingGoal,continuationBudget:{remaining,capacity:CONTINUATION_BUDGET}});
     }});
   pi.registerTool({name:"goal_add",label:"Add goal",exposure:"codemode",
-    description:"Add an assistant-authored TODO for user-requested work. Optional parentId creates a child under an existing non-deleted, non-done, non-cancelled goal; omit for a root. Parent/child statuses are independent. Does not start execution, authorize new scope or bypass pause. Never recreate user-cancelled tasks. Required permissions still apply.",
+    description:"Add an assistant-authored TODO for user-requested work. Optional parentId creates a child under an existing non-deleted, non-done, non-cancelled goal; omit for a root. Parent/child statuses are independent. Does not start execution, authorize new scope or bypass pause. Never recreate user-cancelled tasks or manufacture changes to refill the repeat-reminder budget. Required permissions still apply.",
     parameters:Type.Object({text:Type.String({minLength:1}),parentId:Type.Optional(Type.String({minLength:1}))}),
     async execute(_id,args,signal) { guard(signal); const g=state.add(args.text,"assistant",args.parentId); save(); return result(g); }});
   pi.registerTool({name:"goal_update",label:"Update goal",exposure:"codemode",
-    description:"Edit TODO text/status without starting execution or resetting loop protection. setBy is immutable; updatedBy records assistant. Cannot edit deleted or cancelled items. Rewording revokes execution scope. Respect user edits and permissions.",
+    description:"Edit TODO text/status without starting execution. Actual goal changes replenish the shared repeat-reminder budget; no-op edits do not. setBy is immutable; updatedBy records assistant. Cannot edit deleted or cancelled items. Rewording revokes execution scope. Respect user edits and permissions.",
     parameters:Type.Object({id:Type.String({minLength:1}),text:Type.Optional(Type.String({minLength:1})),status:Type.Optional(Type.Union(statuses.map(s=>Type.Literal(s))))}),
     async execute(_id,args,signal) { guard(signal); const g=state.update(args.id,args,"assistant"); reconcile(); save(); return result(g); }});
   pi.registerTool({name:"goal_delete",label:"Delete goal",exposure:"codemode",
-    description:"Soft-delete an erroneous/duplicate TODO, retaining history and author. Delete children first; parents with non-deleted children cannot be deleted. Ask consent before deleting user-created or user-edited items. Does not reset loop protection or authorize other work. Blocked work is not a reason to delete.",
+    description:"Soft-delete an erroneous/duplicate TODO, retaining history and author. Delete children first; parents with non-deleted children cannot be deleted. Ask consent before deleting user-created or user-edited items. Replenishes the shared repeat-reminder budget but does not authorize other work. Blocked work is not a reason to delete.",
     parameters:Type.Object({id:Type.String({minLength:1})}),
     async execute(_id,args,signal) { guard(signal); const g=state.delete(args.id,"assistant"); reconcile(); save(); return result(g); }});
   function deliver(kind: string, triggerTurn: boolean) {
@@ -114,7 +127,7 @@ export default function goalExtension(pi: ExtensionAPI) {
   function restore(ctx: ExtensionContext) {
     cancelRetry(); resetContinuation(); uiContext=ctx; pendingGoal=undefined; afterBacktrack=false;
     const entry=[...ctx.sessionManager.getBranch()].reverse().find(e=>e.type==="custom" && e.customType===ENTRY);
-    state.restore(entry?.type==="custom" ? entry.data : undefined); updateStatus(ctx);
+    state.restore(entry?.type==="custom" ? entry.data : undefined); observedGoals=state.goals; updateStatus(ctx);
     if (state.goals.length) ctx.ui.notify("Goals restored; automatic execution is not resumed.","info");
   }
   async function retryError(entries: SessionBoundaryDraft[],ctx: ExtensionContext) {
@@ -153,17 +166,16 @@ export default function goalExtension(pi: ExtensionAPI) {
   pi.on("session_tree",(_event,ctx)=>restore(ctx));
   pi.on("session_shutdown",()=>{cancelRetry(); if (state.run?.status==="active") {state.transition("paused");save();}});
   pi.on("agent_before_settle",(event,ctx)=>{
-    if (state.run?.status!=="active") { resetContinuation(); return; }
-    if (event.outcome!=="completed" || ctx.signal?.aborted) resetContinuation();
+    if (state.run?.status!=="active") return;
     if (event.outcome==="error" && !ctx.signal?.aborted) { if (!event.continue) return retryError(event.entries,ctx); return; }
     if (event.outcome!=="completed" || ctx.signal?.aborted) { cancelRetry(); state.transition("paused"); save(); ctx.ui.notify("Goal run paused after interruption.","info"); return; }
     retryCount=0; reconcile(); save();
     if (state.run?.status!=="active" || pendingGoal || ctx.hasPendingMessages() || event.continue) return;
     // Only goal-owned successful auto-continuation decisions count, not tool turns,
     // error retries, queued messages or another extension's continuation.
-    if (rapidContinuation()) {
-      cancelRetry(); state.transition("paused"); save(); resetContinuation();
-      ctx.ui.notify("Goal run paused: possible loop (10 consecutive auto-continue intervals under 10 seconds). Use /goal resume to continue.","warning");
+    if (continuationExhausted()) {
+      cancelRetry(); state.transition("paused"); save();
+      ctx.ui.notify("Goal run paused: possible loop (repeat-reminder budget exhausted; unchanged goals repeated within 1 minute). Use /goal resume to continue.","warning");
       return;
     }
     return {entries:[...event.entries,{type:"custom_message" as const,...message("still active")}],continue:true};

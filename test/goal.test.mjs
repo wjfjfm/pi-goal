@@ -80,6 +80,17 @@ test('real run pauses after ten rapid auto-continue intervals',async t=>{
   assert.equal(state(h).run.status,'paused');
   assert.equal('turnsRemaining' in state(h).run,false);
 });
+test('real goal changes sustain more than ten repeated reminder injections',async t=>{
+  const h=await fixture(t,n=>{
+    if(n===25)return finish;
+    if(n<25 && n%2===1)return code('const s=JSON.parse(await tools.goal_show({})); const g=s.goals[0]; text(await tools.goal_update({id:g.id,status:g.status==="todo"?"doing":"todo"}));');
+    return {};
+  },[],30);
+  await h.session.prompt('/goal progressing task');await settled(h.session);
+  assert.equal(h.requests.length,26);
+  assert.equal(state(h).run.status,'complete');
+  assert.equal(h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('Goals still active')).length,12);
+});
 test('real tool-driven execution can exceed twenty model turns',async t=>{
   const h=await fixture(t,n=>n<=25?code('text(await tools.goal_show({}));'):n===26?finish:{},[],35);
   await h.session.prompt('/goal long task');await settled(h.session);

@@ -62,6 +62,7 @@ export class GoalState {
     if (patch.text === undefined && patch.status === undefined) throw new Error("Specify text or status.");
     if (patch.text !== undefined && !patch.text.trim()) throw new Error("Goal text must not be blank.");
     if (patch.status !== undefined && !statuses.includes(patch.status)) throw new Error("Invalid goal status.");
+    if ((patch.text === undefined || patch.text.trim() === g.text) && (patch.status === undefined || patch.status === g.status)) return {...g};
     const next = {...g,...(patch.status === undefined ? {} : {status:patch.status}),...(patch.text === undefined ? {} : {text:patch.text.trim()}),updatedBy:by,updatedAt:this.now()};
     this.goals = this.goals.map(item=>item.id === id ? next : item);
     // Rewording revokes execution scope; it never silently authorizes a different task.

@@ -91,52 +91,97 @@ test('user edit delivery bars stale writes; cancelled tasks cannot be revived',a
   await call(h,'goal_update',{id,status:'doing'});
   assert.notEqual(h.state().run.status,'active');
 });
-test('ten consecutive rapid intervals pause; CRUD and summaries do not reset detection',async t=>{
+const budget=async h=>(await show(h)).continuationBudget.remaining;
+const inject=h=>h.handlers.agent_before_settle(boundary,h.ctx);
+test('module budget pauses on tenth short reminder interval, not tool turns',async t=>{
   t.mock.timers.enable({apis:['Date'],now:0});
   const h=fixture();await h.run('first');
-  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true); // Baseline, not an interval.
+  assert.equal(inject(h).continue,true);
   for(let i=1;i<=9;i++){
-    t.mock.timers.tick(9999);
-    assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
+    t.mock.timers.tick(59999);
+    assert.equal(inject(h).continue,true);assert.equal(await budget(h),10-i);
   }
-  await call(h,'goal_add',{text:'later'});
-  await call(h,'goal_update',{id:h.state().goals[0].id,status:'doing'});
-  await show(h);await h.run('resume'); // Already active: no reset.
+  const id=h.state().goals[0].id;
+  await call(h,'goal_update',{id,text:' first ',status:'todo'}); // No actual change.
+  await assert.rejects(()=>call(h,'goal_update',{id,text:' '}),/blank/);
+  await h.run('update '+id+' todo');
+  await show(h);await h.run('resume');
   h.handlers.session_compact({},h.ctx);
   h.handlers.tool_result({toolName:'backtrack',isError:false});
-  h.handlers.turn_end({entries:[]},h.ctx);
-  t.mock.timers.tick(9999);
-  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
+  for(let i=0;i<100;i++)h.handlers.turn_end({entries:[]},h.ctx);
+  assert.equal(await budget(h),1);
+  t.mock.timers.tick(59999);
+  assert.equal(inject(h),undefined);assert.equal(await budget(h),0);
   assert.equal(h.state().run.status,'paused');
   assert.match(h.notices.at(-1)[0],/possible loop/);
-  assert.equal('turnsRemaining' in h.state().run,false);
-  await h.run('resume');
-  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
-  assert.equal(h.state().run.ids.length,2);
+  await h.run('resume');assert.equal(await budget(h),10);
 });
-test('clock rollback and error boundaries restart timing rather than adding rapid intervals',async t=>{
-  t.mock.timers.enable({apis:['Date'],now:10000});
-  const h=fixture();await h.run('work');
-  for(let i=0;i<10;i++)assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
-  t.mock.timers.setTime(0);
-  for(let i=0;i<10;i++)assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
-  assert.equal(h.handlers.agent_before_settle({outcome:'error',entries:[],continue:true},h.ctx),undefined);
-  for(let i=0;i<10;i++)assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
-  assert.equal(h.handlers.agent_before_settle(boundary,h.ctx),undefined);
-  assert.equal(h.state().run.status,'paused');
+test('any actual goal mutation refills the one shared budget without starting execution',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:0});
+  const changes=[
+    (h,id)=>call(h,'goal_add',{text:'new'}),
+    (h,id)=>call(h,'goal_update',{id,status:'doing'}),
+    (h,id)=>call(h,'goal_update',{id,text:'changed'}),
+    (h,id)=>call(h,'goal_delete',{id}),
+    (h,id)=>h.run('add new'),
+    (h,id)=>h.run('update '+id+' done'),
+    (h,id)=>h.run('update '+id+' text edited'),
+    (h,id)=>h.run('delete '+id),
+  ];
+  for(const change of changes){
+    const h=fixture();await h.run('work');
+    const id=(await call(h,'goal_add',{text:'other goal'})).details.id;
+    for(let i=0;i<10;i++)assert.equal(inject(h).continue,true);
+    assert.equal(await budget(h),1);
+    await change(h,id);
+    assert.equal(await budget(h),10);assert.equal(h.state().run.status,'active');
+    assert.equal(inject(h).continue,true);assert.equal(await budget(h),10);
+    for(let i=0;i<9;i++)assert.equal(inject(h).continue,true);
+    assert.equal(inject(h),undefined);
+    await call(h,'goal_add',{text:'planning while paused'});
+    assert.equal(await budget(h),10);assert.equal(h.state().run.status,'paused');
+  }
 });
-test('10 seconds or more clears rapid streak; normal execution has no total turn limit',async t=>{
+test('one-minute gaps neither charge nor refill; ten continuous minutes refill periodically',async t=>{
   t.mock.timers.enable({apis:['Date'],now:0});
   const h=fixture();await h.run('work');
-  for(let cycle=0;cycle<5;cycle++){
-    for(let i=0;i<10;i++){
-      assert.equal(h.handlers.agent_before_settle(boundary,h.ctx).continue,true);
-      t.mock.timers.tick(i===9?10000:1);
-    }
-  }
+  for(let i=0;i<10;i++)assert.equal(inject(h).continue,true);
+  assert.equal(await budget(h),1);
+  t.mock.timers.tick(60000);assert.equal(inject(h).continue,true);
+  assert.equal(await budget(h),1);
+  t.mock.timers.setTime(599999);assert.equal(inject(h).continue,true);
+  assert.equal(await budget(h),1);
+  t.mock.timers.tick(1);assert.equal(inject(h).continue,true);
+  assert.equal(await budget(h),10);
+  t.mock.timers.tick(1);assert.equal(inject(h).continue,true);
+  assert.equal(await budget(h),9);
+  t.mock.timers.setTime(1200000);assert.equal(inject(h).continue,true);
+  assert.equal(await budget(h),10);
   for(let i=0;i<100;i++)h.handlers.turn_end({entries:[]},h.ctx);
-  assert.equal(h.state().run.status,'active');
-  assert.equal('turnsRemaining' in (await show(h)).run,false);
+  assert.equal(await budget(h),10);assert.equal(h.state().run.status,'active');
+});
+test('goal changes do not postpone periodic refill; pause and resume start a new continuous period',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:0});
+  const h=fixture();await h.run('work');inject(h);
+  t.mock.timers.setTime(599999);
+  await call(h,'goal_add',{text:'later'});inject(h);
+  t.mock.timers.setTime(600000);inject(h);
+  assert.equal(await budget(h),10);
+  await h.run('pause');
+  t.mock.timers.setTime(1199999);await h.run('resume');inject(h);
+  t.mock.timers.setTime(1200000);inject(h);
+  assert.equal(await budget(h),9,'paused time must not count towards continuous runtime');
+});
+test('error boundaries do not consume or replenish reminder budget',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:10000});
+  const h=fixture();await h.run('work');
+  for(let i=0;i<10;i++)assert.equal(inject(h).continue,true);
+  assert.equal(await budget(h),1);
+  assert.equal(h.handlers.agent_before_settle({outcome:'error',entries:[],continue:true},h.ctx),undefined);
+  assert.equal(await budget(h),1);
+  t.mock.timers.setTime(0); // Clock rollback only resets timing, not budget.
+  assert.equal(inject(h).continue,true);assert.equal(await budget(h),1);
+  assert.equal(inject(h),undefined);assert.equal(await budget(h),0);
 });
 test('pending and external continuations do not count; restore and resume reset timing',async t=>{
   t.mock.timers.enable({apis:['Date'],now:0});

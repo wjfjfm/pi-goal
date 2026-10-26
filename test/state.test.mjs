@@ -37,6 +37,16 @@ test('invalid parents are rejected and malformed persisted graphs repaired',()=>
   assert.equal(s.get('c').parentId,undefined);assert.equal(s.get('self').parentId,undefined);
   assert.equal(s.get('legacy').parentId,undefined);
 });
+test('no-op edits preserve goal identity, authorship and timestamps',()=>{
+  let now=100;
+  const s=new GoalState(()=>now),g=s.add('task','user'),goals=s.goals;
+  now=200;s.update(g.id,{text:' task ',status:'todo'},'assistant');
+  assert.equal(s.goals,goals);
+  assert.deepEqual(s.get(g.id),g);
+  s.update(g.id,{status:'doing'},'assistant');
+  assert.notEqual(s.goals,goals);
+  assert.equal(s.get(g.id).updatedAt,200);
+});
 test('source, timestamps and tombstones persist; snapshots are detached',()=>{
   let now=100;
   const s=new GoalState(()=>now),g=s.add('first','user');
