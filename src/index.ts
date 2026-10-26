@@ -72,11 +72,18 @@ export default function goalExtension(pi: ExtensionAPI) {
   function expose() {
     pi.registerTool({
       name: "goal_update", label: "Update goal",
-      description: "Complete the active goal when its requirements are satisfied, or pause it when blocked or awaiting user input.",
+      description: "Show the current goal, status, set time, latest resume time (if any) and elapsed running time without changing it; complete the active goal when satisfied, or pause it when blocked or awaiting user input.",
       exposure: state.goal?.status === "active" && !pendingGoal ? "codemode" : "hidden",
-      parameters: Type.Object({ status: Type.Union([Type.Literal("complete"), Type.Literal("pause")]) }),
+      parameters: Type.Object({ status: Type.Union([Type.Literal("show"), Type.Literal("complete"), Type.Literal("pause")]) }),
       async execute(_id, args, signal, _onUpdate, ctx) {
         if (signal?.aborted) throw new Error("Goal update cancelled.");
+        if (args.status === "show") {
+          const current = state.snapshot();
+          const text = current
+            ? `Goal: ${current.text}\nStatus: ${current.status}\nSet time: ${current.setAt === undefined ? "Unknown (legacy record)" : new Date(current.setAt).toISOString()}${current.resumedAt === undefined ? "" : `\nResume time: ${new Date(current.resumedAt).toISOString()}`}\nRunning time: ${duration(current.elapsedMs)}${pendingGoal ? "\nAwaiting delivery." : ""}`
+            : "No goal set.";
+          return { content: [{ type: "text", text }], details: { goal: current ?? null, pendingDelivery: !!pendingGoal } };
+        }
         if (pendingGoal) throw new Error("New goal is awaiting delivery.");
         if (state.goal?.status !== "active") throw new Error("No active goal.");
         cancelRetry();

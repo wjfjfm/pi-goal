@@ -8,6 +8,32 @@ import { createAssistantMessageEventStream, getCurrentTools } from '@earendil-wo
 import extension from '../dist/index.js';
 import { GoalState, reminder } from '../dist/state.js';
 
+test('set and latest resume timestamps persist, reset on replacement and tolerate legacy records',()=>{
+  let now=1000;
+  const s=new GoalState(()=>now);
+  s.set('first');assert.equal(s.snapshot().setAt,1000);
+  assert.equal(s.snapshot().resumedAt,undefined);
+  now=2000;s.transition('paused');
+  now=4000;s.transition('active');
+  assert.equal(s.snapshot().setAt,1000);
+  assert.equal(s.snapshot().resumedAt,4000);
+  now=5000;const saved=s.snapshot();
+  now=9000;s.restore(saved);
+  assert.equal(s.snapshot().setAt,1000);
+  assert.equal(s.snapshot().resumedAt,4000);
+  assert.equal(s.elapsed(),2000);
+  s.transition('active');assert.equal(s.snapshot().resumedAt,9000);
+  now=10000;s.set('replacement');
+  assert.equal(s.snapshot().setAt,10000);
+  assert.equal(s.snapshot().resumedAt,undefined);
+  s.restore({text:'legacy',status:'paused',elapsedMs:50});
+  assert.equal(s.snapshot().setAt,undefined);
+  assert.equal(s.snapshot().resumedAt,undefined);
+  s.restore({text:'invalid times',status:'paused',elapsedMs:50,setAt:Infinity,resumedAt:1e20});
+  assert.equal(s.snapshot().setAt,undefined);
+  assert.equal(s.snapshot().resumedAt,undefined);
+});
+
 test('time excludes pauses and offline time; restore validates persisted data', () => {
   let now = 0;
   const s = new GoalState(() => now);
@@ -70,6 +96,27 @@ test('disabled goal is invisible; active goal uses real codemode and repeats unt
   await h.session.prompt('/goal test goal'); await settled(h.session);
   assert.equal(h.requests.length,4);
   assert.equal(h.api.getAllTools().find(t=>t.name==='goal_update').exposure, 'hidden');
+  assert.equal(h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data.status,'complete');
+});
+
+test('agent can show the active goal through real codemode without completing it', async t => {
+  const h = await fixture(t,(n,context)=>{
+    if(n===1)return {content:[{type:'toolCall',name:'codemode',id:'show',arguments:{code:'text(await tools.goal_update({status:"show"}));'}}]};
+    if(n===2){
+      const result=context.messages.find(m=>m.role==='toolResult'&&m.toolCallId==='show');
+      assert.ok(result);
+      assert.notEqual(result.isError,true);
+      assert.match(JSON.stringify(result.content),/Goal: inspect goal/);
+      assert.match(JSON.stringify(result.content),/Status: active/);
+      assert.match(JSON.stringify(result.content),/Set time: \d{4}-/);
+      assert.doesNotMatch(JSON.stringify(result.content),/Resume time:/);
+      assert.match(JSON.stringify(result.content),/Running time:/);
+      return complete;
+    }
+    return {};
+  });
+  await h.session.prompt('/goal inspect goal');await settled(h.session);
+  assert.equal(h.requests.length,3);
   assert.equal(h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1).data.status,'complete');
 });
 

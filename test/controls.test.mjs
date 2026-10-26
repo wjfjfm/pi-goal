@@ -15,6 +15,41 @@ function fixture({codemode=true}={}) {
   extension(pi);
   return {handlers,tools,entries,messages,notices,statuses,ctx,run:arg=>command(arg,ctx),idle:v=>idle=v,pending:v=>pending=v,active:()=>active,state:()=>entries.at(-1)?.data};
 }
+test('show returns a read-only snapshot without delivery or lifecycle side effects',async()=>{
+  const h=fixture();
+  const show=()=>h.tools.get('goal_update').execute('show',{status:'show'});
+  assert.equal((await show()).details.goal,null);
+  await h.run('target');
+  for(const change of ['active','pause','resume','complete','clear','replacement']) {
+    if(change==='complete')await h.tools.get('goal_update').execute('done',{status:'complete'},undefined,undefined,h.ctx);
+    else if(change==='replacement'){h.idle(false);await h.run('replacement');}
+    else if(change!=='active')await h.run(change);
+    const counts=[h.entries.length,h.messages.length,h.notices.length,h.statuses.length];
+    const tool=h.tools.get('goal_update');
+    const result=await show();
+    assert.equal(result.details.goal.text,h.state().text);
+    assert.equal(result.details.goal.status,h.state().status);
+    assert.ok(result.details.goal.elapsedMs>=h.state().elapsedMs);
+    assert.equal(result.details.pendingDelivery,change==='replacement');
+    assert.match(result.content[0].text,/Running time:/);
+    assert.ok(result.content[0].text.includes('Set time: '+new Date(result.details.goal.setAt).toISOString()));
+    if(result.details.goal.resumedAt===undefined)assert.doesNotMatch(result.content[0].text,/Resume time:/);
+    else assert.ok(result.content[0].text.includes('Resume time: '+new Date(result.details.goal.resumedAt).toISOString()));
+    assert.deepEqual([h.entries.length,h.messages.length,h.notices.length,h.statuses.length],counts);
+    assert.equal(h.tools.get('goal_update'),tool);
+  }
+  await assert.rejects(()=>h.tools.get('goal_update').execute('done',{status:'complete'}),/awaiting delivery/);
+});
+
+test('show does not cancel an automatic retry',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const h=fixture();await h.run('target');
+  const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
+  await h.tools.get('goal_update').execute('show',{status:'show'});
+  t.mock.timers.tick(1000);
+  assert.equal((await retry).continue,true);
+});
+
 test('footer shows goal lifecycle and clears on clear or empty session restore',async()=>{
   const h=fixture();h.ctx.hasUI=true;
   const status=()=>h.statuses.at(-1);

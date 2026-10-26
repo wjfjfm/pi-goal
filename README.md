@@ -11,6 +11,7 @@
 目标未完成时，Agent 每次准备结束都会收到提醒并继续执行。完成或遇到阻塞时，由 Agent 通过 codemode 更新状态：
 
 ```js
+await tools.goal_update({status: "show"});     // 查看目标、状态、设置/恢复时间及累计运行时间
 await tools.goal_update({status: "complete"}); // 完成
 await tools.goal_update({status: "pause"});    // 阻塞或等待用户
 ```
