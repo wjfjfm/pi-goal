@@ -13,14 +13,14 @@ export default function goalExtension(pi: ExtensionAPI) {
   function cancelRetry() { retryAbort?.abort(); retryAbort=undefined; retryCount=0; retryRequested=false; }
   function summary() {
     const r=state.snapshot().run;
-    return `${state.visible().map(g=>`[${g.status}] ${g.id} ${g.text} (set by ${g.setBy ?? "unknown (legacy)"})`).join("\n") || "No goals."}\nRun: ${r?.status ?? "idle"}; running time: ${duration(state.elapsed())}${r ? `; turns remaining: ${r.turnsRemaining}\nAuthorized IDs: ${r.ids.join(", ")}` : ""}`;
+    return `${state.outline().map(({goal:g,depth})=>`${"  ".repeat(depth)}[${g.status}] ${g.id} ${g.text} (set by ${g.setBy ?? "unknown (legacy)"})`).join("\n") || "No goals."}\nRun: ${r?.status ?? "idle"}; running time: ${duration(state.elapsed())}${r ? `; turns remaining: ${r.turnsRemaining}\nAuthorized IDs: ${r.ids.join(", ")}` : ""}`;
   }
   function updateStatus(ctx=uiContext) {
     if (ctx?.hasUI) ctx.ui.setStatus(MESSAGE,state.goals.length ? `Goals: ${state.visible().length} · ${state.run?.status ?? "idle"} (${duration(state.elapsed())})` : undefined);
   }
   function save() { pi.appendEntry(ENTRY,state.snapshot()); updateStatus(); }
   function message(kind: string) {
-    return {customType:MESSAGE,content:`Goals ${kind}:\n${summary()}\n\nUse codemode tools.goal_show({}), goal_add({text}), goal_update({id,text?,status?}), goal_delete({id}). Status: todo/doing/blocked/done/cancelled. Work only on authorized IDs while the run is active. New or reworded items require user /goal resume to enter execution scope. Listing or doing is not permission. Do not expand scope, bypass confirmations, or recreate cancelled tasks. Mark blocked when awaiting user input.`,display:true};
+    return {customType:MESSAGE,content:`Goals ${kind}:\n${summary()}\n\nUse codemode tools.goal_show({}), goal_add({text,parentId?}), goal_update({id,text?,status?}), goal_delete({id}). Status: todo/doing/blocked/done/cancelled. Work only on authorized IDs while the run is active. New or reworded items require user /goal resume to enter execution scope. Listing or doing is not permission. Do not expand scope, bypass confirmations, or recreate cancelled tasks. Mark blocked when awaiting user input.`,display:true};
   }
   function digest() {
     const goals=state.visible(), count=(s: Status)=>goals.filter(g=>g.status===s).length;
@@ -33,23 +33,23 @@ export default function goalExtension(pi: ExtensionAPI) {
   }
   const result=(value: unknown)=>({content:[{type:"text" as const,text:JSON.stringify(value,(key,v)=>["setAt","updatedAt","deletedAt","resumedAt"].includes(key) && typeof v === "number" ? new Date(v).toISOString() : v,2)}],details:value});
   pi.registerTool({name:"goal_show",label:"Show goals",exposure:"codemode",annotations:{readOnlyHint:true},
-    description:"Read shared TODOs or one by ID, immutable setBy (user/assistant), latest editor, timestamps, run scope and budget. List omits soft-deleted items; lookup includes them. Legacy unknown authors are not invented.",
+    description:"Read shared TODOs in depth-first order with parentId links (absent for roots), or one by ID, immutable setBy (user/assistant), latest editor, timestamps, run scope and budget. List omits soft-deleted items; lookup includes them. Legacy unknown authors are not invented.",
     parameters:Type.Object({id:Type.Optional(Type.String({minLength:1}))}),
     async execute(_id,args,signal) {
       if (signal?.aborted) throw new Error("Goal query cancelled.");
       const s=state.snapshot();
-      return result({...s,goals:args.id ? [{...state.get(args.id)}] : s.goals.filter(g=>g.deletedAt===undefined),pendingDelivery:!!pendingGoal});
+      return result({...s,goals:args.id ? [{...state.get(args.id)}] : state.outline().map(({goal})=>({...goal})),pendingDelivery:!!pendingGoal});
     }});
   pi.registerTool({name:"goal_add",label:"Add goal",exposure:"codemode",
-    description:"Add an assistant-authored TODO for user-requested work. Does not start execution, authorize new scope, renew budgets or bypass pause. Never recreate user-cancelled tasks. Required permissions still apply.",
-    parameters:Type.Object({text:Type.String({minLength:1})}),
-    async execute(_id,args,signal) { guard(signal); const g=state.add(args.text,"assistant"); save(); return result(g); }});
+    description:"Add an assistant-authored TODO for user-requested work. Optional parentId creates a child under an existing non-deleted, non-done, non-cancelled goal; omit for a root. Parent/child statuses are independent. Does not start execution, authorize new scope, renew budgets or bypass pause. Never recreate user-cancelled tasks. Required permissions still apply.",
+    parameters:Type.Object({text:Type.String({minLength:1}),parentId:Type.Optional(Type.String({minLength:1}))}),
+    async execute(_id,args,signal) { guard(signal); const g=state.add(args.text,"assistant",args.parentId); save(); return result(g); }});
   pi.registerTool({name:"goal_update",label:"Update goal",exposure:"codemode",
     description:"Edit TODO text/status without starting execution or renewing budgets. setBy is immutable; updatedBy records assistant. Cannot edit deleted or cancelled items. Rewording revokes execution scope. Respect user edits and permissions.",
     parameters:Type.Object({id:Type.String({minLength:1}),text:Type.Optional(Type.String({minLength:1})),status:Type.Optional(Type.Union(statuses.map(s=>Type.Literal(s))))}),
     async execute(_id,args,signal) { guard(signal); const g=state.update(args.id,args,"assistant"); reconcile(); save(); return result(g); }});
   pi.registerTool({name:"goal_delete",label:"Delete goal",exposure:"codemode",
-    description:"Soft-delete an erroneous/duplicate TODO, retaining history and author. Ask consent before deleting user-created or user-edited items. Does not reset budget or authorize other work. Blocked work is not a reason to delete.",
+    description:"Soft-delete an erroneous/duplicate TODO, retaining history and author. Delete children first; parents with non-deleted children cannot be deleted. Ask consent before deleting user-created or user-edited items. Does not reset budget or authorize other work. Blocked work is not a reason to delete.",
     parameters:Type.Object({id:Type.String({minLength:1})}),
     async execute(_id,args,signal) { guard(signal); const g=state.delete(args.id,"assistant"); reconcile(); save(); return result(g); }});
   function deliver(kind: string, triggerTurn: boolean) {
@@ -80,7 +80,11 @@ export default function goalExtension(pi: ExtensionAPI) {
     const match=/^(add|delete|update)\s+([\s\S]+)$/.exec(args);
     if (match) {
       const [,op,rest]=match;
-      if (op==="add") state.add(rest,"user");
+      if (op==="add") {
+        const child=/^--parent\s+(\S+)\s+([\s\S]+)$/.exec(rest);
+        if (/^--parent(?:\s|$)/.test(rest) && !child) throw new Error("Use /goal add --parent <id> <text>.");
+        state.add(child ? child[2] : rest,"user",child?.[1]);
+      }
       else if (op==="delete") state.delete(rest.trim(),"user");
       else {
         const edit=/^(\S+)\s+(todo|doing|blocked|done|cancelled|text)(?:\s+([\s\S]+))?$/.exec(rest);
@@ -96,7 +100,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     else state.start();
     cancelRetry(); save(); deliver("added by user",true);
   }
-  pi.registerCommand("goal",{description:"Shared TODOs: add <text>, update <id> <status>|text <text>, delete <id>, show, pause, resume; <text> adds and starts.",
+  pi.registerCommand("goal",{description:"Shared TODOs: add [--parent <id>] <text>, update <id> <status>|text <text>, delete <id>, show, pause, resume; <text> adds and starts.",
     async handler(args,ctx) { try { await action(args.trim(),ctx); } catch(error) { ctx.ui.notify(error instanceof Error ? error.message : String(error),"error"); } }});
   function restore(ctx: ExtensionContext) {
     cancelRetry(); uiContext=ctx; pendingGoal=undefined; afterBacktrack=false;

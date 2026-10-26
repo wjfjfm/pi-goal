@@ -19,6 +19,26 @@ function fixture({codemode=true}={}) {
 const call=(h,name,args={},signal)=>h.tools.get(name).execute('test',args,signal,undefined,h.ctx);
 const show=h=>call(h,'goal_show').then(r=>r.details);
 const boundary={outcome:'completed',entries:[]};
+test('parentId supports assistant/user children, ordered queries and indented display',async()=>{
+  const h=fixture();await h.run('root');
+  const id=h.state().goals[0].id;
+  const child=(await call(h,'goal_add',{text:'child',parentId:id})).details;
+  await h.run('add --parent '+child.id+' grandchild');
+  const before=h.entries.length;
+  const list=await show(h);
+  assert.equal(list.goals[1].parentId,id);
+  assert.equal(list.goals[2].parentId,child.id);
+  assert.equal(list.goals[2].setBy,'user');
+  assert.equal(list.run.turnsRemaining,20);assert.deepEqual(list.run.ids,[id]);
+  await h.run('show');
+  assert.ok(h.notices.at(-1)[0].includes('    [todo] '+list.goals[2].id));
+  assert.equal(h.entries.length,before);
+  await assert.rejects(()=>call(h,'goal_delete',{id}),/child goals/);
+  await assert.rejects(()=>call(h,'goal_add',{text:'bad',parentId:'missing'}),/Unknown/);
+  await h.run('add --parent');
+  assert.equal(h.entries.length,before);
+  assert.equal((await call(h,'goal_show',{id:child.id})).details.goals[0].parentId,id);
+});
 test('CRUD is codemode-only, authorship is immutable, add does not execute',async()=>{
   const h=fixture();
   assert.equal(h.tools.has('goal_set'),false);

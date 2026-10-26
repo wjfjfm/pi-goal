@@ -6,7 +6,10 @@
 
 ## 清单与运行
 
-- 持久化 pi-goal-state v2：goals + run。没有顶层目标；每个 goal 就是一项。
+- 持久化 pi-goal-state v2：goals + run。每个 goal 就是一项，可选 parentId 组织多级树；缺省是根。旧 v2 无需迁移。
+- add 可指定已有、未删除、非 done/cancelled 父项；不支持 reparent，因此正常写入不会成环。restore 修复悬空、自引用、环及活项指向已删除父项的链接为根，不丢弃任务。
+- outline 用迭代 DFS 保持同层创建顺序，用户展示缩进，goal_show 全表按 DFS 返回带 parentId 的平铺条目；单项查询不隐含子树。
+- 父子状态独立，无级联；含未删除直接子项的父项禁止删除（含 done/cancelled 子项），逐层删除后仍保留 tombstone parentId。子项作者、执行范围、预算规则不继承父项。
 - setBy 固定 user/assistant，updatedBy 记录最近编辑者；工具来源 assistant，命令来源 user。禁止参数覆盖作者/ID。
 - add/update/delete/show 始终只通过 codemode 暴露；没有 goal_set/goal_clear 独立工具。show 只读，包括 pending、暂停及软删除查询。
 - 软删除留下 deletedAt，默认隐藏；分支上的每次状态快照就是变更历史，不另建审计框架。

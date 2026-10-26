@@ -2,6 +2,41 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {GoalState} from '../dist/state.js';
+test('nested goals preserve hierarchy, independent statuses and execution budget',()=>{
+  const s=new GoalState();
+  const root=s.add('root','user');s.start();s.consumeTurn();
+  const child=s.add('child','assistant',root.id);
+  const other=s.add('other root','user');
+  const grandchild=s.add('grandchild','user',child.id);
+  assert.deepEqual(s.outline().map(r=>[r.goal.id,r.depth]),[[root.id,0],[child.id,1],[grandchild.id,2],[other.id,0]]);
+  assert.equal(s.run.turnsRemaining,19);assert.deepEqual(s.run.ids,[root.id]);
+  assert.throws(()=>s.delete(root.id,'user'),/child goals/);
+  s.update(child.id,{status:'done'},'assistant');
+  assert.equal(s.get(root.id).status,'todo');assert.equal(s.get(grandchild.id).status,'todo');
+  const snapshot=s.snapshot();s.restore(snapshot);
+  assert.equal(s.get(grandchild.id).parentId,child.id);
+  assert.equal(s.get(child.id).setBy,'assistant');
+  assert.deepEqual(s.outline().map(r=>r.depth),[0,1,2,0]);
+  s.delete(grandchild.id,'user');s.delete(child.id,'user');s.delete(root.id,'user');
+  assert.equal(s.get(child.id).parentId,root.id);
+  assert.deepEqual(s.visible().map(g=>g.id),[other.id]);
+});
+test('invalid parents are rejected and malformed persisted graphs repaired',()=>{
+  const s=new GoalState();
+  assert.throws(()=>s.add('orphan','user','missing'),/Unknown/);
+  const root=s.add('root','user');
+  for(const status of ['done','cancelled']){
+    s.update(root.id,{status},'user');
+    assert.throws(()=>s.add('child','assistant',root.id),/Reopen/);
+  }
+  s.delete(root.id,'user');
+  assert.throws(()=>s.add('child','user',root.id),/deleted/);
+  const goal=(id,parentId)=>({id,parentId,text:id,status:'todo'});
+  s.restore({version:2,goals:[goal('a','b'),goal('b','a'),goal('c','missing'),goal('self','self'),goal('legacy')],run:null});
+  assert.equal(s.outline().length,5);
+  assert.equal(s.get('c').parentId,undefined);assert.equal(s.get('self').parentId,undefined);
+  assert.equal(s.get('legacy').parentId,undefined);
+});
 test('source, timestamps and tombstones persist; snapshots are detached',()=>{
   let now=100;
   const s=new GoalState(()=>now),g=s.add('first','user');

@@ -4,7 +4,7 @@ export const statuses = ["todo", "doing", "blocked", "done", "cancelled"] as con
 export type Status = typeof statuses[number];
 export type Actor = "user" | "assistant";
 export interface Goal {
-  id: string; text: string; status: Status;
+  id: string; text: string; status: Status; parentId?: string;
   // Missing only for legacy records whose author cannot be recovered.
   setBy?: Actor; updatedBy?: Actor; setAt?: number; updatedAt?: number; deletedAt?: number;
 }
@@ -23,16 +23,36 @@ export class GoalState {
   elapsed() { return (this.run?.elapsedMs ?? 0) + (this.since === undefined ? 0 : Math.max(0, this.now() - this.since)); }
   snapshot(): Snapshot { return {version:2, goals:this.goals.map(g=>({...g})), run:this.run && {...this.run,ids:[...this.run.ids],elapsedMs:this.elapsed()}}; }
   visible() { return this.goals.filter(g=>g.deletedAt === undefined); }
+  outline() {
+    const children = new Map<string | undefined, Goal[]>();
+    for (const g of this.visible()) {
+      const group = children.get(g.parentId) ?? [];
+      group.push(g); children.set(g.parentId, group);
+    }
+    const stack = (children.get(undefined) ?? []).map(goal=>({goal,depth:0})).reverse();
+    const rows: {goal: Goal; depth: number}[] = [];
+    while (stack.length) {
+      const row = stack.pop()!; rows.push(row);
+      const nested = children.get(row.goal.id) ?? [];
+      for (let i=nested.length-1;i>=0;i--) stack.push({goal:nested[i],depth:row.depth+1});
+    }
+    return rows;
+  }
   get(id: string) {
     const g = this.goals.find(g=>g.id === id);
     if (!g) throw new Error(`Unknown goal: ${id}`);
     return g;
   }
-  add(text: string, by: Actor) {
+  add(text: string, by: Actor, parentId?: string) {
     text = text.trim();
     if (!text) throw new Error("Goal text must not be blank.");
+    if (parentId !== undefined) {
+      const parent = this.get(parentId);
+      if (parent.deletedAt !== undefined) throw new Error("Parent goal was deleted.");
+      if (parent.status === "cancelled" || parent.status === "done") throw new Error("Reopen the parent goal before adding children.");
+    }
     const now = this.now();
-    const g: Goal = {id:randomUUID(),text,status:"todo",setBy:by,updatedBy:by,setAt:now,updatedAt:now};
+    const g: Goal = {id:randomUUID(),text,status:"todo",...(parentId === undefined ? {} : {parentId}),setBy:by,updatedBy:by,setAt:now,updatedAt:now};
     this.goals = [...this.goals,g];
     return {...g};
   }
@@ -52,6 +72,7 @@ export class GoalState {
   delete(id: string, by: Actor) {
     const g = this.get(id);
     if (g.deletedAt !== undefined) throw new Error("Goal was already deleted.");
+    if (this.visible().some(child=>child.parentId === id)) throw new Error("Delete child goals before deleting their parent.");
     const next = {...g,deletedAt:this.now(),updatedAt:this.now(),updatedBy:by};
     this.goals = this.goals.map(item=>item.id === id ? next : item);
     return {...next};
@@ -99,8 +120,21 @@ export class GoalState {
       const g = raw as Goal;
       if (typeof g.id !== "string" || !g.id || seen.has(g.id) || typeof g.text !== "string" || !g.text.trim() || !statuses.includes(g.status)) continue;
       seen.add(g.id);
-      this.goals.push({id:g.id,text:g.text,status:g.status,...(actor(g.setBy) ? {setBy:g.setBy} : {}),...(actor(g.updatedBy) ? {updatedBy:g.updatedBy} : {}),
+      this.goals.push({id:g.id,text:g.text,status:g.status,...(typeof g.parentId === "string" && g.parentId ? {parentId:g.parentId} : {}),...(actor(g.setBy) ? {setBy:g.setBy} : {}),...(actor(g.updatedBy) ? {updatedBy:g.updatedBy} : {}),
         ...(timestamp(g.setAt) ? {setAt:g.setAt} : {}),...(timestamp(g.updatedAt) ? {updatedAt:g.updatedAt} : {}),...(timestamp(g.deletedAt) ? {deletedAt:g.deletedAt} : {})});
+    }
+    // Older v2 records are roots. Repair malformed links without losing tasks.
+    const byId = new Map(this.goals.map(g=>[g.id,g]));
+    for (const g of this.goals) {
+      const path = new Set([g.id]);
+      let cursor = g;
+      while (cursor.parentId !== undefined) {
+        const parent = byId.get(cursor.parentId);
+        if (!parent || path.has(parent.id) || (cursor.deletedAt === undefined && parent.deletedAt !== undefined)) {
+          delete cursor.parentId; break;
+        }
+        path.add(parent.id); cursor = parent;
+      }
     }
     const r = v.run as Run | null;
     if (!r || !["active","paused","complete"].includes(r.status) || !Array.isArray(r.ids) || !Number.isFinite(r.elapsedMs) || r.elapsedMs < 0) return;

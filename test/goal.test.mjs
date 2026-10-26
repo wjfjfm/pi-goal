@@ -44,6 +44,16 @@ async function settled(session) {
 const code=code=>({content:[{type:'toolCall',name:'codemode',id:'call',arguments:{code}}]});
 const finish=code('const s=JSON.parse(await tools.goal_show({})); for(const g of s.goals) if(s.run.ids.includes(g.id)) text(await tools.goal_update({id:g.id,status:"done"}));');
 const state=h=>h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1)?.data;
+test('real codemode creates multilevel goals without starting a run',async t=>{
+  const h=await fixture(t,n=>n===1?code('const root=JSON.parse(await tools.goal_add({text:"root"})); const child=JSON.parse(await tools.goal_add({text:"child",parentId:root.id})); text(await tools.goal_add({text:"grandchild",parentId:child.id})); text(await tools.goal_show({}));'):{});
+  h.api.setActiveTools([...h.api.getActiveTools(),'codemode']);
+  await h.session.prompt('Plan a task tree');await settled(h.session);
+  const s=state(h);
+  assert.equal(s.goals.length,3);
+  assert.equal(s.goals[1].parentId,s.goals[0].id);
+  assert.equal(s.goals[2].parentId,s.goals[1].id);
+  assert.equal(s.run,null);assert.equal(h.requests.length,2);
+});
 test('real codemode CRUD stays idle and records assistant provenance',async t=>{
   const h=await fixture(t,n=>n===1?code('text(await tools.goal_add({text:"plan only"}));'):n===3?code('const s=JSON.parse(await tools.goal_show({})); text(await tools.goal_update({id:s.goals[0].id,status:"doing"}));'):{});
   h.api.setActiveTools([...h.api.getActiveTools(),'codemode']);

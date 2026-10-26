@@ -6,6 +6,7 @@
 
 ```js
 await tools.goal_add({text: "补充测试"});
+await tools.goal_add({text: "补充集成测试", parentId: "父项 ID"});
 await tools.goal_show({});
 await tools.goal_show({id: "目标 ID"});
 await tools.goal_update({id: "目标 ID", status: "doing"});
@@ -21,12 +22,23 @@ await tools.goal_delete({id: "目标 ID"});
 新增、编辑、删除都**不启动执行、不补充预算**；设为 doing 也不代表授权。
 Agent 不得扩大用户任务范围、绕过确认或重建已取消任务；删除用户创建或修改过的项应先征求同意。
 
+## 多级列表
+
+`goal_add` 的可选 `parentId` 指向父项；省略则创建顶层项，可继续嵌套多级。
+`/goal` 按层级缩进展示；`goal_show({})` 返回深度优先排列的条目及 parentId，
+按 ID 查询仍只返回指定项。没有 parentId 的旧记录视为顶层项。
+
+父项必须存在、未删除且不是 done/cancelled。父子状态独立，不自动汇总或级联；
+删除父项前须先删除其子项（即使子项已完成）。暂不支持移动父子关系。
+子项单独记录 setBy，也不会因为父项正在执行而自动获得授权或补充预算。
+
 ## 用户命令
 
 | 命令 | 操作 |
 | --- | --- |
 | `/goal` 或 `/goal show` | 查看清单、来源和执行状态 |
-| `/goal add <文本>` | 仅新增，来源为 user |
+| `/goal add <文本>` | 仅新增顶层项，来源为 user |
+| `/goal add --parent <id> <文本>` | 新增子项，来源为 user |
 | `/goal update <id> <状态>` | 修改状态 |
 | `/goal update <id> text <文本>` | 修改内容 |
 | `/goal delete <id>` | 软删除 |
