@@ -71,7 +71,7 @@ export default function goalExtension(pi: ExtensionAPI) {
   async function action(args: string,ctx: ExtensionCommandContext) {
     uiContext=ctx;
     if (!args || args==="show") { ctx.ui.notify(summary(),"info"); return; }
-    if (["pause","parse","clear","exit"].includes(args)) {
+    if (["pause","clear","exit"].includes(args)) {
       if (!state.goal) return;
       const status=args==="clear" || args==="exit" ? "closed" : "paused";
       if (status==="paused" && state.goal.status!=="active") return;

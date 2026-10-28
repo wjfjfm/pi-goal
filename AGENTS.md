@@ -6,7 +6,7 @@
 
 ## 单目标契约
 
-- 用户 /goal <text> 设置或替换唯一目标，setBy=user；/goal 查看；pause/parse 暂停，resume/continue 恢复，clear/exit 关闭。show 为查看兼容别名。
+- 用户 /goal <text> 设置或替换唯一目标，setBy=user；/goal 查看；pause 暂停，resume/continue 恢复，clear/exit 关闭。show 为查看兼容别名。
 - 只有一个状态：active / paused / blocked / complete / closed。无第二份 run 状态，无 task doing 与 goal paused 分离的问题。
 - Agent 仅有 codemode-only goal_show() 和 goal_update({status:"complete"|"blocked"})。schema 拒绝额外参数。无 goal_set/add/delete、task_*，也没有 Agent resume。
 - goal_update 必须 active、已送达且 signal 未取消。完成/阻塞都停止计时和自动继续；用户 resume 接受 paused/blocked，直接切回 active，不恢复 complete/closed。

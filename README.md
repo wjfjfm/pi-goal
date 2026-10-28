@@ -12,7 +12,7 @@
 | --- | --- |
 | `/goal <目标>` | 设置或替换唯一目标，开始执行 |
 | `/goal` | 查看目标、状态和累计运行时间 |
-| `/goal pause` | 暂停（也支持 `/goal parse`） |
+| `/goal pause` | 暂停 |
 | `/goal resume` | 恢复暂停或受阻的目标 |
 | `/goal clear` | 结束目标 |
 

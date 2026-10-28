@@ -75,13 +75,13 @@ test('agent can only complete/block active delivered goal; blocked resumes direc
   await h.run('clear');await h.run('resume');
   assert.equal(h.state().goal.status,'closed');
 });
-test('pause/parse and resume/continue control one status and reject stale writes',async()=>{
+test('pause and resume/continue control one status and reject stale writes',async()=>{
   const h=fixture();await h.run('old');h.idle(false);await h.run('replacement');
   const msg=h.messages.at(-1);
   await assert.rejects(()=>call(h,'goal_update',{status:'complete'}),/awaiting delivery/);
   assert.equal(inject(h),undefined);
   h.handlers.message_start({message:{role:'custom',...msg}});
-  await h.run('parse');assert.equal(h.state().goal.status,'paused');
+  await h.run('pause');assert.equal(h.state().goal.status,'paused');
   await assert.rejects(()=>call(h,'goal_update',{status:'complete'}),/No active/);
   await h.run('continue');assert.equal(h.state().goal.status,'active');
   await assert.rejects(()=>call(h,'goal_update',{status:'blocked'}),/awaiting delivery/);
