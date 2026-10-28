@@ -105,6 +105,29 @@ test('new goal during held tool blocks old completion until steer delivery',asyn
   const changed=msgs.findIndex(m=>m.role==='user'&&JSON.stringify(m.content).includes('Goal: replacement'));
   assert.ok(result>=0&&changed>result);
 });
+test('resume steers exactly once while a tool runs, including an already active goal',async t=>{
+  for(const pauseFirst of [false,true])await t.test(String(pauseFirst),async t=>{
+    let release,entered;
+    const gate=new Promise(r=>release=r),started=new Promise(r=>entered=r);
+    const h=await fixture(t,n=>n===1?{content:[{type:'toolCall',name:'hold',id:'hold',arguments:{}}]}:n===2?finish:{});
+    h.api.registerTool({name:'hold',label:'hold',description:'barrier',parameters:{type:'object',properties:{}},async execute(_id,_args,_signal,_update,ctx){
+      entered();await gate;
+      await assert.rejects(()=>ctx.executeTool('goal_update',{status:'complete'}),/awaiting delivery/);
+      return {content:[{type:'text',text:'held tool finished'}],details:undefined};
+    }});
+    t.after(()=>release());
+    await h.session.prompt('/goal original');await started;
+    if(pauseFirst)await h.session.prompt('/goal pause');
+    await h.session.prompt('/goal resume');
+    assert.equal(h.requests.length,1);
+    release();await settled(h.session);
+    assert.equal(h.requests.length,3);assert.equal(state(h).status,'complete');
+    const msgs=h.requests[1].messages;
+    const resumed=msgs.filter(m=>m.role==='user'&&JSON.stringify(m.content).includes('Goal resumed:'));
+    assert.equal(resumed.length,1);
+    assert.ok(msgs.indexOf(resumed[0])>msgs.findIndex(m=>m.role==='toolResult'&&m.toolCallId==='hold'));
+  });
+});
 test('real reminder loop pauses after ten sub-minute intervals',async t=>{
   const h=await fixture(t,()=>({}),[],15);
   await h.session.prompt('/goal loop');await settled(h.session);

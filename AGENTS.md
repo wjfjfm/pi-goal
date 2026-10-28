@@ -9,7 +9,7 @@
 - 用户 /goal <text> 设置或替换唯一目标，setBy=user；/goal 查看；pause 暂停，resume/continue 恢复，clear/exit 关闭。show 为查看兼容别名。
 - 只有一个状态：active / paused / blocked / complete / closed。无第二份 run 状态，无 task doing 与 goal paused 分离的问题。
 - Agent 仅有 codemode-only goal_show() 和 goal_update({status:"complete"|"blocked"})。schema 拒绝额外参数。无 goal_set/add/delete、task_*，也没有 Agent resume。
-- goal_update 必须 active、已送达且 signal 未取消。完成/阻塞都停止计时和自动继续；用户 resume 接受 paused/blocked，直接切回 active，不恢复 complete/closed。
+- goal_update 必须 active、已送达且 signal 未取消。完成/阻塞都停止计时和自动继续；用户 resume 接受 active/paused/blocked，暂停或受阻时切回 active；每次注入一次目标上下文，不恢复 complete/closed。
 - goal_show 纯只读，模型正文只有 Goal/Status 两行（无目标为 No goal set.）；更新回复只有 Goal complete/blocked。诊断 details 保留 goal 快照、pendingDelivery、continuationBudget，不向模型展开元数据。无 ID、父子关系或清单字段。
 - set 重置累计用时和设置时间；resume 保留累计用时、记录 resumedAt；elapsed 不含暂停或离线时间。
 - 目标提示 display:false；compact/backtrack 摘要格式 [pursuing goal (0h 43m 23s); codemode tools.goal_show() for detail]，display:true；仅 active 时显示摘要与状态栏，其他状态不显示；时间为累计 active 用时。手动查询仍可查看所有状态。/goal 使用通知，仅展示目标、状态和累计用时；TUI/RPC/print 通用。
@@ -25,7 +25,7 @@
 
 ## 投递与边界
 
-- 用户设置/恢复共用唯一 goalDelivery + steer，匹配 message_start 才清除投递屏障，防止旧工具结果完成新目标。
+- 用户设置/恢复共用唯一 goalDelivery + steer、triggerTurn:true；空闲启动 Agent，运行中 steer，已 active 也不跳过 resume。匹配 message_start 才清除投递屏障，防止旧工具结果完成新目标。
 - pause/clear 关闭写回与自动继续，不中断工具，不撤销已排队提示。resume 建立新的投递屏障。
 - agent_before_settle 是自动继续边界，尊重 event.continue、pending messages 和投递屏障。
 - compact 成功且 active 时发送简短状态，triggerTurn:false。成功 backtrack tool_result 置标记，在整批工具 turn_end 清除标记，仅 active 时在 event.entries 后追加一次摘要。失败不注入，不更改目标或预算。
@@ -37,7 +37,7 @@
 - 仅成功、active、无 pending/其他 continuation、准备重复注入时检查。
 - 首次/目标变更后首次只建基准；无变更且间隔 <60000ms 扣1，归零暂停。本次不返回 continuation；保留0便于诊断。
 - >=60000ms 不扣也不补满。连续 active 满600000ms 在下次检查补满，本次不扣；无后台计时器。
-- 用户替换 active 目标补满但不推迟连续周期；新运行/resume 重置预算及周期；active 重复 resume 无副作用。
+- 用户替换 active 目标补满但不推迟连续周期；新运行/resume 重置预算及周期；active 时 resume 同样重置并注入一次上下文。
 - Agent complete/blocked 或用户 pause/clear 属于目标状态变化，补满但不恢复执行；错误/保护机制暂停不补预算。
 - 查询、摘要、pending、其他扩展继续和错误重试不计数；时钟倒退只重建基准，不赠送预算。预算不持久化。
 
