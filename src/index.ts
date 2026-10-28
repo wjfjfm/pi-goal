@@ -42,7 +42,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     pi.appendEntry(ENTRY,state.snapshot()); updateStatus();
   }
   function message(kind: string) {
-    return {customType:MESSAGE,content:`Goals ${kind}:\n${summary(true)}\n\nUse codemode tools.goal_show({}), goal_add({text,parentId?}), goal_update({id,text?,status?}), goal_delete({id}). Status: todo/doing/blocked/done/cancelled. Work only on authorized IDs while the run is active. New or reworded items require user /goal resume to enter execution scope. Listing or doing is not permission. Do not expand scope, bypass confirmations, or recreate cancelled tasks. Mark blocked when awaiting user input.`,display:false};
+    return {customType:MESSAGE,content:`Goals ${kind}:\n${summary(true)}\n\nUse codemode tools.goal_show({}), goal_add({text,parentId?}), goal_update({id,text?,status?}), goal_delete({id}). Status: todo/doing/blocked/done/cancelled. Work only on authorized IDs while the run is active. New or reworded items require user /goal resume to enter execution scope. Listing or doing is not permission. Do not expand scope, bypass confirmations, or recreate cancelled tasks. Mark blocked when awaiting user input. User resume retries blocked items as todo; re-check their prerequisites and mark blocked again if still unresolved. Resume does not waive permissions or required confirmations.`,display:false};
   }
   function digest() {
     const goals=state.visible(), count=(s: Status)=>goals.filter(g=>g.status===s).length;
@@ -92,7 +92,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     if (["resume","continue"].includes(args)) {
       if (state.run?.status==="active") return;
       if (!ensureCodemode(ctx)) return;
-      state.start(); resetContinuation(); cancelRetry(); save(); deliver("resumed",true); return;
+      state.start(true); resetContinuation(); cancelRetry(); save(); deliver("resumed",true); return;
     }
     if (["clear","exit"].includes(args)) {
       cancelRetry(); state.transition("paused");

@@ -26,7 +26,7 @@
 - add/update/delete/show 始终只通过 codemode 暴露；没有 goal_set/goal_clear 独立工具。show 只读，包括 pending、暂停及软删除查询。
 - 软删除留下 deletedAt，默认隐藏；分支上的每次状态快照就是变更历史，不另建审计框架。
 - run.ids 是当前用户授权的执行范围。纯 CRUD 不启动、不扩大范围；实际 goal 变更会补满模块预算；重写文本撤销该 ID 的执行范围。
-- 用户 resume 纳入当前 todo/doing，无总轮数上限；active 时重复 resume 无副作用。/goal <text> 是明确新增并执行的快捷命令，active 时扩展范围，并因新增 goal 补满预算，但不重置连续运行周期。
+- 用户 resume/continue 显式重试：将所有未删除 blocked 项改为 todo（updatedBy=user，保留 setBy/父子关系），与已有 todo/doing 一起纳入执行；不重开 done/cancelled/deleted，无总轮数上限。active 时重复 resume 无副作用。普通 /goal <text> 启动不隐式解锁其他 blocked 项。恢复提示要求重新核实阻塞条件，不代表权限或确认被豁免。/goal <text> 是明确新增并执行的快捷命令，active 时扩展范围，并因新增 goal 补满预算，但不重置连续运行周期。
 - turn_end 仅持久化累计用时及处理摘要，不做轮数限制。blocked/done/cancelled/deleted 不再推动本轮。最后 runnable 消失时 reconcile 暂停或完成。
 - Agent 不可修改 cancelled/deleted；用户通过简单命令控制整体执行，不再通过 ID 重开单项。语义授权、禁止重建取消项、删除用户项须确认依靠工具描述，不声称代码能验证同意。
 - 旧单目标迁移为 legacy ID。旧预算字段只能证明 assistant 来源；无法判断的来源/时间保持缺失，不伪造。

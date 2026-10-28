@@ -19,6 +19,23 @@ function fixture({codemode=true}={}) {
 const call=(h,name,args={},signal)=>h.tools.get(name).execute('test',args,signal,undefined,h.ctx);
 const show=h=>call(h,'goal_show').then(r=>r.details);
 const boundary={outcome:'completed',entries:[]};
+test('user resume retries blocked goals with delivery gating and does not bypass pause or clear',async()=>{
+  const h=fixture();await h.run('work');
+  const id=h.state().goals[0].id;
+  await call(h,'goal_update',{id,status:'blocked'});assert.equal(h.state().run.status,'paused');
+  h.idle(false);await h.run('resume');
+  assert.equal(h.state().run.status,'active');assert.equal(h.state().goals[0].status,'todo');
+  assert.equal(h.state().goals[0].updatedBy,'user');assert.equal((await show(h)).continuationBudget.remaining,10);
+  await assert.rejects(()=>call(h,'goal_update',{id,status:'done'}),/awaiting delivery/);
+  const entries=h.entries.length,messages=h.messages.length;
+  await h.run('resume');assert.equal(h.entries.length,entries);assert.equal(h.messages.length,messages);
+  h.handlers.message_start({message:{role:'custom',...h.messages.at(-1)}});
+  await call(h,'goal_update',{id,status:'blocked'});
+  await h.run('continue');assert.equal(h.state().goals[0].status,'todo');
+  h.handlers.message_start({message:{role:'custom',...h.messages.at(-1)}});
+  await h.run('clear');const count=h.messages.length;
+  await h.run('resume');assert.equal(h.messages.length,count);assert.equal(h.state().goals[0].status,'cancelled');
+});
 test('agent manages hierarchy while user display hides internal IDs',async()=>{
   const h=fixture();await h.run('root');
   const id=h.state().goals[0].id;

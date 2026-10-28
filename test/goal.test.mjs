@@ -98,6 +98,24 @@ test('real tool-driven execution can exceed twenty model turns',async t=>{
   assert.equal(h.requests.length,27);
   assert.equal(state(h).run.status,'complete');
 });
+test('user directly resumes an agent-blocked goal through the real SDK',async t=>{
+  const blocked=code('const s=JSON.parse(await tools.goal_show({})); text(await tools.goal_update({id:s.goals[0].id,status:"blocked"}));');
+  const h=await fixture(t,(n,context)=>{
+    if(n===1)return blocked;
+    if(n===3){
+      assert.equal(state(h).goals[0].status,'todo');
+      assert.equal(state(h).goals[0].updatedBy,'user');
+      assert.match(JSON.stringify(context.messages),/re-check their prerequisites/);
+      return finish;
+    }
+    return {};
+  });
+  await h.session.prompt('/goal blocked task');await settled(h.session);
+  assert.equal(state(h).run.status,'paused');assert.equal(state(h).goals[0].status,'blocked');
+  await h.session.prompt('/goal resume');await settled(h.session);
+  assert.equal(h.requests.length,4);assert.equal(state(h).run.status,'complete');
+  assert.equal(state(h).goals[0].status,'done');
+});
 test('agent updates blocked plan on natural-language request; only user resume starts execution',async t=>{
   const update=status=>code('const s=JSON.parse(await tools.goal_show({})); text(await tools.goal_update({id:s.goals[0].id,status:"'+status+'"}));');
   const h=await fixture(t,n=>n===1?update('blocked'):n===3?update('todo'):n===5?finish:{});

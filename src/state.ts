@@ -78,9 +78,13 @@ export class GoalState {
     return {...next};
   }
   runnable() { return this.visible().filter(g=>this.run?.ids.includes(g.id) && (g.status === "todo" || g.status === "doing")); }
-  start() {
-    const ids = this.visible().filter(g=>g.status === "todo" || g.status === "doing").map(g=>g.id);
-    if (!ids.length) throw new Error("No todo/doing goals. Unblock a goal before resuming.");
+  start(retryBlocked = false) {
+    const candidates = this.visible().filter(g=>g.status === "todo" || g.status === "doing" || (retryBlocked && g.status === "blocked"));
+    if (!candidates.length) throw new Error("No unfinished goals to resume.");
+    // Explicit user resume means retry blocked work, not that its prerequisites
+    // are satisfied. The agent must re-check them and may block again.
+    for (const g of candidates) if (g.status === "blocked") this.update(g.id,{status:"todo"},"user");
+    const ids = candidates.map(g=>g.id);
     this.run = {status:"active",ids,elapsedMs:this.elapsed(),resumedAt:this.now()};
     this.since = this.now();
   }

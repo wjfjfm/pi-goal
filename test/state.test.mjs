@@ -37,6 +37,25 @@ test('invalid parents are rejected and malformed persisted graphs repaired',()=>
   assert.equal(s.get('c').parentId,undefined);assert.equal(s.get('self').parentId,undefined);
   assert.equal(s.get('legacy').parentId,undefined);
 });
+test('explicit resume retries blocked goals without reviving terminal or deleted items',()=>{
+  let now=100;const s=new GoalState(()=>now);
+  const root=s.add('root','user'),child=s.add('child','assistant',root.id);
+  const done=s.add('done','user'),cancelled=s.add('cancelled','user'),deleted=s.add('deleted','user');
+  s.start();now=200;
+  for(const g of [root,child,deleted])s.update(g.id,{status:'blocked'},'assistant');
+  s.update(done.id,{status:'done'},'assistant');s.update(cancelled.id,{status:'cancelled'},'user');s.delete(deleted.id,'user');
+  s.reconcile();assert.equal(s.run.status,'paused');
+  const before=s.snapshot();assert.throws(()=>s.start(),/No unfinished/);assert.deepEqual(s.snapshot(),before);
+  now=300;s.start(true);
+  assert.equal(s.run.status,'active');assert.deepEqual(s.run.ids,[root.id,child.id]);
+  assert.equal(s.get(child.id).status,'todo');assert.equal(s.get(child.id).setBy,'assistant');
+  assert.equal(s.get(child.id).updatedBy,'user');assert.equal(s.get(child.id).updatedAt,300);
+  assert.equal(s.get(child.id).parentId,root.id);assert.equal(s.get(root.id).setAt,100);
+  assert.equal(s.get(done.id).status,'done');assert.equal(s.get(cancelled.id).status,'cancelled');
+  assert.equal(s.get(deleted.id).status,'blocked');assert.equal(s.get(deleted.id).deletedAt,200);
+  for(const g of [root,child])s.update(g.id,{status:'blocked'},'assistant');
+  s.reconcile();assert.equal(s.run.status,'paused','unresolved prerequisites may block again');
+});
 test('no-op edits preserve goal identity, authorship and timestamps',()=>{
   let now=100;
   const s=new GoalState(()=>now),g=s.add('task','user'),goals=s.goals;
