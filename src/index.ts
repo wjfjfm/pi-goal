@@ -80,10 +80,10 @@ export default function goalExtension(pi: ExtensionAPI) {
       ctx.ui.notify(status==="closed" ? "Goal cleared." : "Goal paused; current tools are not interrupted.","info"); return;
     }
     if (["resume","continue"].includes(args)) {
-      if (state.goal?.status!=="active" && state.goal?.status!=="paused" && state.goal?.status!=="blocked") { ctx.ui.notify("No paused or blocked goal to resume.","info"); return; }
+      if (state.goal?.status==="active") return;
+      if (state.goal?.status!=="paused" && state.goal?.status!=="blocked") { ctx.ui.notify("No paused or blocked goal to resume.","info"); return; }
       if (!ensureCodemode(ctx)) return;
-      if (state.goal.status!=="active") state.resume();
-      resetContinuation(); cancelRetry(); save(); deliver("resumed"); return;
+      state.resume(); resetContinuation(); cancelRetry(); save(); deliver("resumed"); return;
     }
     if (/^(?:add|update|delete)(?:\s|$)/.test(args) || /(?:^|\s)--parent(?:-id)?(?:\s|=|$)/.test(args)) {
       ctx.ui.notify("Goal is a single user-set objective. Use /goal <text> to set or replace it, or /goal pause / resume / clear.","info"); return;

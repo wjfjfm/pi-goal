@@ -69,7 +69,7 @@ test('agent can only complete/block active delivered goal; blocked resumes direc
   assert.equal(h.state().goal.status,'blocked');assert.equal(inject(h),undefined);
   await assert.rejects(()=>call(h,'goal_update',{status:'complete'}),/No active/);
   await h.run('resume');assert.equal(h.state().goal.status,'active');
-  const n=h.messages.length;await h.run('resume');assert.equal(h.messages.length,n+1);
+  const n=h.messages.length;await h.run('resume');assert.equal(h.messages.length,n);
   await call(h,'goal_update',{status:'complete'});
   await h.run('resume');assert.equal(h.state().goal.status,'complete');
   await h.run('clear');await h.run('resume');
@@ -109,7 +109,7 @@ test('ten short repeat intervals exhaust module budget; ordinary turns and reads
   for(let i=1;i<=9;i++){t.mock.timers.tick(59999);assert.equal(inject(h).continue,true);}
   assert.equal(await budget(h),1);
   for(let i=0;i<100;i++)h.handlers.turn_end({entries:[]},h.ctx);
-  await h.run('show');h.handlers.session_compact({},h.ctx);
+  await h.run('show');await h.run('resume');h.handlers.session_compact({},h.ctx);
   h.handlers.tool_result({toolName:'backtrack',isError:false});h.handlers.turn_end({entries:[]},h.ctx);
   assert.equal(await budget(h),1);t.mock.timers.tick(59999);
   assert.equal(inject(h),undefined);assert.equal(h.state().goal.status,'paused');assert.equal(await budget(h),0);
