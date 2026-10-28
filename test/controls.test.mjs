@@ -42,7 +42,7 @@ test('show and status digest keep model-facing text minimal',async t=>{
   t.mock.timers.enable({apis:['Date'],now:0});
   const h=fixture();assert.equal((await call(h,'goal_show')).content[0].text,'No goal set.');
   await h.run('work');
-  assert.equal((await call(h,'goal_show')).content[0].text,'Goal: work\nStatus: active');
+  assert.equal((await call(h,'goal_show')).content[0].text,'Goal: work\nStatus: active\nRunning time: 0h 0m 0s\nUse codemode tools.goal_update({status:"complete"|"blocked"}) when done or blocked.');
   t.mock.timers.tick(2603000);
   h.handlers.session_compact({},h.ctx);
   assert.equal(h.messages.at(-1).content,'[pursuing goal (0h 43m 23s); codemode tools.goal_show() for detail]');
@@ -50,6 +50,24 @@ test('show and status digest keep model-facing text minimal',async t=>{
   assert.match(h.notices.at(-1)[0],/Running time:/);
   assert.doesNotMatch(h.notices.at(-1)[0],/budget|setBy|setAt/);
   assert.equal((await call(h,'goal_update',{status:'blocked'})).content[0].text,'Goal blocked.');
+});
+test('context injection contract stays minimal across set, resume and continuation',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:0});
+  const h=fixture();h.handlers.session_start({},h.ctx);
+  assert.equal(h.messages.length,0);
+  await h.run('work');
+  const expected='Goal: work\nUse codemode tools.goal_update({status:"complete"|"blocked"}) when done or blocked.';
+  assert.equal(h.messages.at(-1).content,expected);
+  assert.equal(h.messages.at(-1).display,false);
+  const repeat=inject(h).entries.at(-1);
+  assert.equal(repeat.content,'[pursuing goal (0h 0m 0s); codemode tools.goal_show() for detail]');
+  assert.equal(repeat.display,false);
+  const n=h.messages.length;await h.run('resume');assert.equal(h.messages.length,n);
+  t.mock.timers.tick(60000);await h.run('pause');
+  t.mock.timers.tick(60000);
+  assert.match((await call(h,'goal_show')).content[0].text,/Status: paused\nRunning time: 0h 1m 0s/);
+  await h.run('resume');
+  assert.equal(h.messages.length,n+1);assert.equal(h.messages.at(-1).content,expected);
 });
 test('show is read-only in every lifecycle state and respects cancellation',async()=>{
   const h=fixture();await h.run('work');
@@ -172,7 +190,11 @@ test('ten exponential retries preserve raw history and stop; show does not cance
     const retry=h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);
     await show(h);t.mock.timers.tick(1000*2**(i-1));
     const r=await retry;assert.equal(r.continue,true);
-    if(i>1)assert.deepEqual(r.entries[0],{type:'context_edit',targetId:'error-'+i,replacement:null});
+    assert.equal(r.entries.length,1);
+    if(i===1){
+      assert.match(r.entries[0].content,/^\[pursuing goal \(\d+h \d+m \d+s\); codemode tools.goal_show\(\) for detail\]$/);
+      assert.equal(r.entries[0].display,false);
+    }else assert.deepEqual(r.entries[0],{type:'context_edit',targetId:'error-'+i,replacement:null});
     h.handlers.agent_start();
   }
   await h.handlers.agent_before_settle({outcome:'error',entries:[]},h.ctx);

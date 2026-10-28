@@ -10,9 +10,9 @@
 - 只有一个状态：active / paused / blocked / complete / closed。无第二份 run 状态，无 task doing 与 goal paused 分离的问题。
 - Agent 仅有 codemode-only goal_show() 和 goal_update({status:"complete"|"blocked"})。schema 拒绝额外参数。无 goal_set/add/delete、task_*，也没有 Agent resume。
 - goal_update 必须 active、已送达且 signal 未取消。完成/阻塞都停止计时和自动继续；用户 resume 接受 paused/blocked，切回 active 并注入一次目标上下文；active 直接跳过，不恢复 complete/closed。
-- goal_show 纯只读，模型正文只有 Goal/Status 两行（无目标为 No goal set.）；更新回复只有 Goal complete/blocked。诊断 details 保留 goal 快照、pendingDelivery、continuationBudget，不向模型展开元数据。无 ID、父子关系或清单字段。
+- goal_show 纯只读，模型正文包含 Goal/Status/Running time 和一行 goal_update 操作提示（无目标为 No goal set.）；更新回复只有 Goal complete/blocked。诊断 details 保留 goal 快照、pendingDelivery、continuationBudget，不向模型展开元数据。无 ID、父子关系或清单字段。
 - set 重置累计用时和设置时间；resume 保留累计用时、记录 resumedAt；elapsed 不含暂停或离线时间。
-- 目标提示 display:false；compact/backtrack 摘要格式 [pursuing goal (0h 43m 23s); codemode tools.goal_show() for detail]，display:true；仅 active 时显示摘要与状态栏，其他状态不显示；时间为累计 active 用时。手动查询仍可查看所有状态。/goal 使用通知，仅展示目标、状态和累计用时；TUI/RPC/print 通用。
+- 设置/替换/恢复仅注入两行：Goal: <text> 和 Use codemode tools.goal_update({status:"complete"|"blocked"}) when done or blocked.，不重复计时、权限或恢复说明。目标提示 display:false；compact/backtrack 摘要格式 [pursuing goal (0h 43m 23s); codemode tools.goal_show() for detail]，display:true；仅 active 时显示摘要与状态栏，其他状态不显示；时间为累计 active 用时。手动查询仍可查看所有状态。/goal 使用通知，仅展示目标、状态和累计用时；TUI/RPC/print 通用。
 
 ## 持久化与迁移
 
@@ -27,7 +27,7 @@
 
 - 用户设置/恢复共用唯一 goalDelivery + steer、triggerTurn:true；目标为 paused/blocked 时恢复：Agent 空闲则启动，运行中则 steer；目标已 active 则直接跳过，不注入。匹配 message_start 才清除投递屏障，防止旧工具结果完成新目标。
 - pause/clear 关闭写回与自动继续，不中断工具，不撤销已排队提示。resume 建立新的投递屏障。
-- agent_before_settle 是自动继续边界，尊重 event.continue、pending messages 和投递屏障。
+- agent_before_settle 是自动继续边界，尊重 event.continue、pending messages 和投递屏障。自动继续只注入与 compact/backtrack 相同的一行 pursuing goal 摘要，display:false，不重复目标全文或操作说明。
 - compact 成功且 active 时发送简短状态，triggerTurn:false。成功 backtrack tool_result 置标记，在整批工具 turn_end 清除标记，仅 active 时在 event.entries 后追加一次摘要。失败不注入，不更改目标或预算。
 - restore/shutdown 取消重试；shutdown 将 active 保存为 paused。
 
@@ -44,13 +44,13 @@
 ## 错误恢复
 
 - 连续错误最多10次，退避1–512秒，耗尽暂停。
-- 第一次追加 retrying 提示，后续 context_edit 排除最近失败 assistant 的请求上下文，保留原始历史。
+- 每段连续错误的第一次只追加一行 pursuing goal 摘要，display:false；后续 context_edit 排除最近失败 assistant 的请求上下文，保留原始历史。
 - retryRequested 仅在返回 continuation 时设置，agent_start 清除；最终 settled 未执行重试则暂停。
 - pause/clear/replace/restore/shutdown 取消等待，旧 controller finally 不清除新 controller。
 
 ## 验证
 
-- controls.test.mjs：两工具接口、用户控制、阻塞恢复、投递屏障、预算、取消、摘要。
+- controls.test.mjs：两工具接口、用户控制、阻塞恢复、投递屏障、预算、取消、摘要；精确断言设置/恢复和重复提醒正文，防止上下文再次膨胀。
 - state.test.mjs：单目标替换、计时、快照校验、v2/旧单目标迁移。
 - goal.test.mjs：真实 SDK/codemode、运行中替换、阻塞恢复、长工具执行、错误恢复、compact。
 - 真实 pi-backtrack 两种加载顺序联测：

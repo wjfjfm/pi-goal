@@ -75,7 +75,7 @@ test('user-set single goal repeats then agent completes it',async t=>{
   assert.equal(h.requests.length,3);assert.equal(state(h).status,'complete');
   assert.equal(state(h).text,'user objective');assert.equal(state(h).setBy,'user');
   assert.equal('id' in state(h),false);
-  assert.match(JSON.stringify(h.requests[1].messages),/Goal still active/);
+  assert.match(JSON.stringify(h.requests[1].messages),/\[pursuing goal \(/);
 });
 test('agent blocks goal; user directly resumes and timing/state agree',async t=>{
   const h=await fixture(t,n=>n===1?blocked:n===3?finish:{});
@@ -84,7 +84,7 @@ test('agent blocks goal; user directly resumes and timing/state agree',async t=>
   await h.session.prompt('/goal resume');await settled(h.session);
   assert.equal(h.requests.length,4);assert.equal(state(h).status,'complete');
   assert.ok(state(h).resumedAt);
-  assert.match(JSON.stringify(h.requests[2].messages),/Resume means retry/);
+  assert.equal(h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('Goal: wait for input\n')).length,2);
 });
 test('new goal during held tool blocks old completion until steer delivery',async t=>{
   let release,entered;
@@ -123,9 +123,9 @@ test('resume steers a paused goal while a tool runs, but skips an active goal',a
     release();await settled(h.session);
     assert.equal(h.requests.length,3);assert.equal(state(h).status,'complete');
     const msgs=h.requests[1].messages;
-    const resumed=msgs.filter(m=>m.role==='user'&&JSON.stringify(m.content).includes('Goal resumed:'));
-    assert.equal(resumed.length,pauseFirst?1:0);
-    if(pauseFirst)assert.ok(msgs.indexOf(resumed[0])>msgs.findIndex(m=>m.role==='toolResult'&&m.toolCallId==='hold'));
+    const resumed=msgs.filter(m=>m.role==='user'&&JSON.stringify(m.content).includes('Goal: original'));
+    assert.equal(resumed.length,pauseFirst?2:1);
+    if(pauseFirst)assert.ok(msgs.indexOf(resumed.at(-1))>msgs.findIndex(m=>m.role==='toolResult'&&m.toolCallId==='hold'));
   });
 });
 test('real reminder loop pauses after ten sub-minute intervals',async t=>{
@@ -143,7 +143,7 @@ test('provider errors retry without accumulating reminders or deleting raw error
   await h.session.prompt('/goal retry');await settled(h.session);
   assert.equal(h.requests.length,4);assert.equal(state(h).status,'complete');
   assert.equal(h.sm.getBranch().filter(e=>e.type==='message'&&e.message.role==='assistant'&&e.message.stopReason==='error').length,2);
-  assert.equal(h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('Goal retrying')).length,1);
+  assert.equal(h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('[pursuing goal (')).length,1);
 });
 test('aborting retry pauses without further model requests',async t=>{
   const h=await fixture(t,()=>({error:'failure'}));

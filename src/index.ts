@@ -5,6 +5,7 @@ import { Type } from "typebox";
 import { GoalState, duration } from "./state.js";
 
 const ENTRY="pi-goal-state", MESSAGE="pi-goal", MAX_RETRIES=10;
+const UPDATE_HINT='Use codemode tools.goal_update({status:"complete"|"blocked"}) when done or blocked.';
 const REPEAT_INTERVAL_MS=60_000, CONTINUATION_BUDGET=10, REFILL_PERIOD_MS=600_000;
 export default function goalExtension(pi: ExtensionAPI) {
   const state=new GoalState();
@@ -33,19 +34,19 @@ export default function goalExtension(pi: ExtensionAPI) {
     if (ctx?.hasUI) ctx.ui.setStatus(MESSAGE,state.goal?.status==="active" ? `Goal: ${state.goal.status} (${duration(state.elapsed())})` : undefined);
   }
   function save() { pi.appendEntry(ENTRY,state.snapshot()); updateStatus(); }
-  function message(kind: string) {
-    return {customType:MESSAGE,content:`Goal ${kind}:\n${summary()}\n\nOnly the user may set, replace, resume or clear the goal. Use codemode tools.goal_show() to inspect it, or tools.goal_update({status:"complete"}) when satisfied / tools.goal_update({status:"blocked"}) when unable to proceed. Do not expand scope or bypass required permissions or confirmations. Resume means retry, not that previous blockers are resolved.`,display:false};
+  function message() {
+    return {customType:MESSAGE,content:`Goal: ${state.goal?.text}\n${UPDATE_HINT}`,display:false};
   }
-  function digest() {
-    return {customType:MESSAGE,content:`[pursuing goal (${duration(state.elapsed())}); codemode tools.goal_show() for detail]`,display:true};
+  function digest(display=true) {
+    return {customType:MESSAGE,content:`[pursuing goal (${duration(state.elapsed())}); codemode tools.goal_show() for detail]`,display};
   }
   pi.registerTool({name:"goal_show",label:"Show goal",exposure:"codemode",annotations:{readOnlyHint:true},
-    description:"Show the single user-set goal and its status. Read-only.",
+    description:"Show the goal, status, elapsed active time and how to report its outcome. Read-only.",
     parameters:Type.Object({},{additionalProperties:false}),
     async execute(_id,_args,signal) {
       if (signal?.aborted) throw new Error("Goal query cancelled.");
       const goal=state.snapshot().goal;
-      return {content:[{type:"text",text:goal ? `Goal: ${goal.text}\nStatus: ${goal.status}` : "No goal set."}],
+      return {content:[{type:"text",text:goal ? `${summary()}\n${UPDATE_HINT}` : "No goal set."}],
         details:{goal,pendingDelivery:!!pendingGoal,continuationBudget:{remaining,capacity:CONTINUATION_BUDGET}}};
     }});
   pi.registerTool({name:"goal_update",label:"Report goal outcome",exposure:"codemode",
@@ -59,9 +60,9 @@ export default function goalExtension(pi: ExtensionAPI) {
       cancelRetry(); state.transition(args.status); refillContinuation(); save();
       return {content:[{type:"text",text:`Goal ${args.status}.`}],details:{goal:state.snapshot().goal}};
     }});
-  function deliver(kind: string) {
+  function deliver() {
     pendingGoal=randomUUID();
-    pi.sendMessage({...message(kind),details:{goalDelivery:pendingGoal}},{triggerTurn:true,deliverAs:"steer"});
+    pi.sendMessage({...message(),details:{goalDelivery:pendingGoal}},{triggerTurn:true,deliverAs:"steer"});
   }
   function ensureCodemode(ctx: ExtensionContext) {
     if (!pi.getAllTools().some(t=>t.name==="codemode")) { ctx.ui.notify("Goal requires the codemode tool.","error"); return false; }
@@ -83,7 +84,7 @@ export default function goalExtension(pi: ExtensionAPI) {
       if (state.goal?.status==="active") return;
       if (state.goal?.status!=="paused" && state.goal?.status!=="blocked") { ctx.ui.notify("No paused or blocked goal to resume.","info"); return; }
       if (!ensureCodemode(ctx)) return;
-      state.resume(); resetContinuation(); cancelRetry(); save(); deliver("resumed"); return;
+      state.resume(); resetContinuation(); cancelRetry(); save(); deliver(); return;
     }
     if (/^(?:add|update|delete)(?:\s|$)/.test(args) || /(?:^|\s)--parent(?:-id)?(?:\s|=|$)/.test(args)) {
       ctx.ui.notify("Goal is a single user-set objective. Use /goal <text> to set or replace it, or /goal pause / resume / clear.","info"); return;
@@ -92,7 +93,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     const wasActive=state.goal?.status==="active";
     state.set(args); cancelRetry();
     if (wasActive) refillContinuation(); else resetContinuation();
-    save(); deliver("set by user");
+    save(); deliver();
   }
   pi.registerCommand("goal",{description:"Set or replace one goal with <text>, view it with /goal, or pause / resume / clear.",
     async handler(args,ctx) { try { await action(args.trim(),ctx); } catch(error) { ctx.ui.notify(error instanceof Error ? error.message : String(error),"error"); } }});
@@ -111,7 +112,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     try {
       await timers.setTimeout(1000*2**(attempt-1),undefined,{signal:controller.signal});
       if (state.goal?.status!=="active" || controller.signal.aborted || pendingGoal || ctx.hasPendingMessages()) return;
-      if (attempt===1) { retryRequested=true; return {entries:[...entries,{type:"custom_message" as const,...message("retrying")}],continue:true}; }
+      if (attempt===1) { retryRequested=true; return {entries:[...entries,{type:"custom_message" as const,...digest(false)}],continue:true}; }
       const last=[...ctx.sessionManager.getBranch()].reverse().find(e=>e.type==="message" && e.message.role!=="system");
       if (last?.type!=="message" || last.message.role!=="assistant" || last.message.stopReason!=="error") return;
       retryRequested=true; return {entries:[...entries,{type:"context_edit" as const,targetId:last.id,replacement:null}],continue:true};
@@ -150,6 +151,6 @@ export default function goalExtension(pi: ExtensionAPI) {
       cancelRetry(); state.transition("paused"); save();
       ctx.ui.notify("Goal paused: possible loop (repeat-reminder budget exhausted; unchanged goal repeated within 1 minute). Use /goal resume to continue.","warning"); return;
     }
-    return {entries:[...event.entries,{type:"custom_message" as const,...message("still active")}],continue:true};
+    return {entries:[...event.entries,{type:"custom_message" as const,...digest(false)}],continue:true};
   });
 }
