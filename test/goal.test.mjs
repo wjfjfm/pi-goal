@@ -41,162 +41,113 @@ async function settled(session) {
 }
 
 
+
 const code=code=>({content:[{type:'toolCall',name:'codemode',id:'call',arguments:{code}}]});
-const finish=code('const s=JSON.parse(await tools.goal_show({})); for(const g of s.goals) if(s.run.ids.includes(g.id)) text(await tools.goal_update({id:g.id,status:"done"}));');
-const seedPlan=pi=>pi.on('session_start',()=>pi.appendEntry('pi-goal-state',{version:2,goals:[{id:'seed',text:'retained task',status:'todo',setBy:'user'}],run:null}));
-const state=h=>h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1)?.data;
-test('real codemode creates multilevel goals without starting a run',async t=>{
-  const h=await fixture(t,n=>n===1?code('const root=JSON.parse(await tools.goal_add({text:"root"})); const child=JSON.parse(await tools.goal_add({text:"child",parentId:root.id})); text(await tools.goal_add({text:"grandchild",parentId:child.id})); text(await tools.goal_show({}));'):{});
+const finish=code('text(await tools.goal_update({status:"complete"}));');
+const blocked=code('text(await tools.goal_update({status:"blocked"}));');
+const seedPlan=pi=>pi.on('session_start',()=>pi.appendEntry('pi-goal-state',{version:3,goal:{text:'retained goal',status:'paused',elapsedMs:0,setBy:'user'}}));
+const state=h=>h.sm.getBranch().filter(e=>e.type==='custom'&&e.customType==='pi-goal-state').at(-1)?.data.goal;
+test('agent can inspect but cannot create goals or call former list tools',async t=>{
+  const h=await fixture(t,n=>n===1?code('text(await tools.goal_show()); text({removed:ALL_TOOLS.filter(t=>["goal_add","goal_delete","goal_set","task_add"].includes(t.name)).length});'):{});
   h.api.setActiveTools([...h.api.getActiveTools(),'codemode']);
-  await h.session.prompt('Plan a task tree');await settled(h.session);
-  const s=state(h);
-  assert.equal(s.goals.length,3);
-  assert.equal(s.goals[1].parentId,s.goals[0].id);
-  assert.equal(s.goals[2].parentId,s.goals[1].id);
-  assert.equal(s.run,null);assert.equal(h.requests.length,2);
+  await h.session.prompt('inspect');await settled(h.session);
+  assert.equal(h.requests.length,2);assert.equal(state(h),undefined);
+  const result=h.requests[1].messages.find(m=>m.role==='toolResult');
+  assert.notEqual(result.isError,true);
+  assert.match(JSON.stringify(result.content),/removed/);
+  assert.equal(h.api.getAllTools().some(t=>t.name.startsWith('task_')),false);
+  assert.deepEqual(h.api.getAllTools().filter(t=>t.name.startsWith('goal_')).map(t=>t.name).sort(),['goal_show','goal_update']);
 });
-test('real codemode CRUD stays idle and records assistant provenance',async t=>{
-  const h=await fixture(t,n=>n===1?code('text(await tools.goal_add({text:"plan only"}));'):n===3?code('const s=JSON.parse(await tools.goal_show({})); text(await tools.goal_update({id:s.goals[0].id,status:"doing"}));'):{});
-  h.api.setActiveTools([...h.api.getActiveTools(),'codemode']);
-  await h.session.prompt('Plan');await settled(h.session);
-  assert.equal(state(h).goals[0].setBy,'assistant');assert.equal(state(h).run,null);
-  await h.session.prompt('Update');await settled(h.session);
-  assert.equal(state(h).goals[0].status,'doing');assert.equal(state(h).run,null);
-  assert.equal(h.requests.length,4);
-});
-test('real goal run repeats then completes using ID; user author is retained',async t=>{
-  const h=await fixture(t,n=>n===2?finish:{});
-  await h.session.prompt('/goal test task');await settled(h.session);
-  assert.equal(h.requests.length,3);
-  assert.equal(state(h).run.status,'complete');
-  assert.equal(state(h).goals[0].status,'done');
-  assert.equal(state(h).goals[0].setBy,'user');
-  assert.equal(state(h).goals[0].updatedBy,'assistant');
-  assert.match(JSON.stringify(h.requests[1].messages),/Goals still active/);
-});
-test('real run pauses after ten rapid auto-continue intervals',async t=>{
-  const h=await fixture(t,()=>({}),[],15);
-  await h.session.prompt('/goal looping task');await settled(h.session);
-  assert.equal(h.requests.length,11);
-  assert.equal(state(h).run.status,'paused');
-  assert.equal('turnsRemaining' in state(h).run,false);
-});
-test('real goal changes sustain more than ten repeated reminder injections',async t=>{
+test('real codemode rejects editing, IDs and agent resume statuses',async t=>{
   const h=await fixture(t,n=>{
-    if(n===25)return finish;
-    if(n<25 && n%2===1)return code('const s=JSON.parse(await tools.goal_show({})); const g=s.goals[0]; text(await tools.goal_update({id:g.id,status:g.status==="todo"?"doing":"todo"}));');
-    return {};
-  },[],30);
-  await h.session.prompt('/goal progressing task');await settled(h.session);
-  assert.equal(h.requests.length,26);
-  assert.equal(state(h).run.status,'complete');
-  assert.equal(h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('Goals still active')).length,12);
-});
-test('real tool-driven execution can exceed twenty model turns',async t=>{
-  const h=await fixture(t,n=>n<=25?code('text(await tools.goal_show({}));'):n===26?finish:{},[],35);
-  await h.session.prompt('/goal long task');await settled(h.session);
-  assert.equal(h.requests.length,27);
-  assert.equal(state(h).run.status,'complete');
-});
-test('user directly resumes an agent-blocked goal through the real SDK',async t=>{
-  const blocked=code('const s=JSON.parse(await tools.goal_show({})); text(await tools.goal_update({id:s.goals[0].id,status:"blocked"}));');
-  const h=await fixture(t,(n,context)=>{
-    if(n===1)return blocked;
-    if(n===3){
-      assert.equal(state(h).goals[0].status,'todo');
-      assert.equal(state(h).goals[0].updatedBy,'user');
-      assert.match(JSON.stringify(context.messages),/re-check their prerequisites/);
-      return finish;
-    }
+    if(n===1)return code('for(const args of [{status:"doing"},{status:"complete",text:"rewritten"},{status:"complete",id:"old-id"}]) { try { await tools.goal_update(args); text("unexpected success"); } catch(e) { text("rejected"); } }');
+    if(n===2){assert.equal(state(h).status,'active');assert.equal(state(h).text,'user objective');return finish;}
     return {};
   });
-  await h.session.prompt('/goal blocked task');await settled(h.session);
-  assert.equal(state(h).run.status,'paused');assert.equal(state(h).goals[0].status,'blocked');
-  await h.session.prompt('/goal resume');await settled(h.session);
-  assert.equal(h.requests.length,4);assert.equal(state(h).run.status,'complete');
-  assert.equal(state(h).goals[0].status,'done');
+  await h.session.prompt('/goal user objective');await settled(h.session);
+  assert.equal(h.requests.length,3);assert.equal(state(h).status,'complete');
+  const result=h.requests[1].messages.find(m=>m.role==='toolResult');
+  assert.doesNotMatch(JSON.stringify(result.content),/unexpected success/);
 });
-test('agent updates blocked plan on natural-language request; only user resume starts execution',async t=>{
-  const update=status=>code('const s=JSON.parse(await tools.goal_show({})); text(await tools.goal_update({id:s.goals[0].id,status:"'+status+'"}));');
-  const h=await fixture(t,n=>n===1?update('blocked'):n===3?update('todo'):n===5?finish:{});
+test('user-set single goal repeats then agent completes it',async t=>{
+  const h=await fixture(t,n=>n===2?finish:{});
+  await h.session.prompt('/goal user objective');await settled(h.session);
+  assert.equal(h.requests.length,3);assert.equal(state(h).status,'complete');
+  assert.equal(state(h).text,'user objective');assert.equal(state(h).setBy,'user');
+  assert.equal('id' in state(h),false);
+  assert.match(JSON.stringify(h.requests[1].messages),/Goal still active/);
+});
+test('agent blocks goal; user directly resumes and timing/state agree',async t=>{
+  const h=await fixture(t,n=>n===1?blocked:n===3?finish:{});
   await h.session.prompt('/goal wait for input');await settled(h.session);
-  assert.equal(state(h).run.status,'paused');
-  await h.session.prompt('The missing input is ready; mark the task ready to do.');await settled(h.session);
-  assert.equal(state(h).run.status,'paused');assert.equal(h.requests.length,4);
+  assert.equal(state(h).status,'blocked');
   await h.session.prompt('/goal resume');await settled(h.session);
-  assert.equal(state(h).run.status,'complete');assert.equal(h.requests.length,6);
+  assert.equal(h.requests.length,4);assert.equal(state(h).status,'complete');
+  assert.ok(state(h).resumedAt);
+  assert.match(JSON.stringify(h.requests[2].messages),/Resume means retry/);
 });
-test('user edits during a tool batch reject stale writes and arrive before next request',async t=>{
+test('new goal during held tool blocks old completion until steer delivery',async t=>{
   let release,entered;
-  const gate=new Promise(r=>release=r), started=new Promise(r=>entered=r);
-  const h=await fixture(t,n=>n===1?{content:[{type:'toolCall',name:'hold',id:'hold',arguments:{}}]}:{});
-  h.api.registerTool({name:'hold',label:'hold',description:'barrier',parameters:{type:'object',properties:{}},async execute(){
+  const gate=new Promise(r=>release=r),started=new Promise(r=>entered=r);
+  const h=await fixture(t,n=>n===1?{content:[{type:'toolCall',name:'hold',id:'hold',arguments:{}}]}:n===2?finish:{});
+  h.api.registerTool({name:'hold',label:'hold',description:'barrier',parameters:{type:'object',properties:{}},async execute(_id,_args,_signal,_update,ctx){
     entered();await gate;
-    return {content:[{type:'text',text:'released'}]};
+    await assert.rejects(()=>ctx.executeTool('goal_update',{status:'complete'}),/awaiting delivery/);
+    return {content:[{type:'text',text:'old completion rejected'}],details:undefined};
   }});
   t.after(()=>release());
-  await h.session.prompt('/goal original');
-  await started;
-  const id=state(h).goals[0].id;
-  await h.session.prompt('/goal clear');
-  assert.equal(h.requests.length,1);release();await settled(h.session);
-  assert.equal(state(h).goals[0].status,'cancelled');
-  assert.equal(h.requests.length,2);
+  await h.session.prompt('/goal original');await started;
+  await h.session.prompt('/goal replacement');assert.equal(state(h).text,'replacement');
+  release();await settled(h.session);
+  assert.equal(h.requests.length,3);assert.equal(state(h).status,'complete');
   const msgs=h.requests[1].messages;
   const result=msgs.findIndex(m=>m.role==='toolResult'&&m.toolCallId==='hold');
-  const change=msgs.findIndex(m=>m.role==='user'&&JSON.stringify(m.content).includes('Goals cancelled by user'));
-  assert.ok(change>result && result>=0);
+  const changed=msgs.findIndex(m=>m.role==='user'&&JSON.stringify(m.content).includes('Goal: replacement'));
+  assert.ok(result>=0&&changed>result);
 });
-test('provider retry retains errors, then completes; abort stops retry',async t=>{
+test('real reminder loop pauses after ten sub-minute intervals',async t=>{
+  const h=await fixture(t,()=>({}),[],15);
+  await h.session.prompt('/goal loop');await settled(h.session);
+  assert.equal(h.requests.length,11);assert.equal(state(h).status,'paused');
+});
+test('normal tool execution can exceed twenty model turns',async t=>{
+  const h=await fixture(t,n=>n<=25?code('text(await tools.goal_show());'):n===26?finish:{},[],35);
+  await h.session.prompt('/goal long task');await settled(h.session);
+  assert.equal(h.requests.length,27);assert.equal(state(h).status,'complete');
+});
+test('provider errors retry without accumulating reminders or deleting raw errors',async t=>{
   const h=await fixture(t,n=>n<=2?{error:'failure'}:n===3?finish:{});
   await h.session.prompt('/goal retry');await settled(h.session);
-  assert.equal(state(h).run.status,'complete');assert.equal(h.requests.length,4);
+  assert.equal(h.requests.length,4);assert.equal(state(h).status,'complete');
   assert.equal(h.sm.getBranch().filter(e=>e.type==='message'&&e.message.role==='assistant'&&e.message.stopReason==='error').length,2);
-  assert.equal(h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('Goals retrying')).length,1);
+  assert.equal(h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('Goal retrying')).length,1);
 });
-test('aborting real retry pauses execution',async t=>{
+test('aborting retry pauses without further model requests',async t=>{
   const h=await fixture(t,()=>({error:'failure'}));
   await h.session.prompt('/goal abort');
   while(!h.requests.length)await new Promise(r=>setTimeout(r,5));
-  await new Promise(r=>setTimeout(r,30));
-  await h.session.abort();await settled(h.session);
-  assert.equal(h.requests.length,1);assert.equal(state(h).run.status,'paused');
+  await new Promise(r=>setTimeout(r,30));await h.session.abort();await settled(h.session);
+  assert.equal(h.requests.length,1);assert.equal(state(h).status,'paused');
 });
-test('manual compact injects digest without starting a turn or changing run state',async t=>{
+test('compact injects a single-goal digest without resuming',async t=>{
   const h=await fixture(t,()=>({}),[
     pi=>pi.on('session_before_compact',event=>({compaction:{summary:'Test summary',firstKeptEntryId:event.preparation.firstKeptEntryId,tokensBefore:1}})),
   ],10,false,true);
   await h.session.prompt('hello');await settled(h.session);
   await h.session.prompt('more context');await settled(h.session);
-  const before=JSON.stringify(state(h));
-  await h.session.compact();
-  assert.equal(h.requests.length,2);
-  assert.equal(JSON.stringify(state(h)),before);
-  const digests=h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('[goal status:'));
-  assert.equal(digests.length,1);
+  const before=JSON.stringify(state(h));await h.session.compact();
+  assert.equal(h.requests.length,2);assert.equal(JSON.stringify(state(h)),before);
   await h.session.prompt('continue');await settled(h.session);
-  assert.match(JSON.stringify(h.requests[2].messages),/goal status: 1 todo/);
+  assert.match(JSON.stringify(h.requests[2].messages),/goal status: paused;/);
 });
-
-test('actual pi-backtrack zero reset retains goal digest in either extension order', {skip:!process.env.PI_GOAL_BACKTRACK_TEST},async t=>{
+test('actual pi-backtrack retains single-goal digest in either extension order',{skip:!process.env.PI_GOAL_BACKTRACK_TEST},async t=>{
   const {default:backtrack}=await import(process.env.PI_GOAL_BACKTRACK_TEST);
   for(const goalFirst of [false,true])await t.test(String(goalFirst),async t=>{
-    const h=await fixture(t,n=>n===1?{content:[{type:'toolCall',name:'backtrack',id:'bt',arguments:{checkpoint:0,message:'Continue pending tasks.'}}]}:{},[backtrack],10,goalFirst,true);
+    const h=await fixture(t,n=>n===1?{content:[{type:'toolCall',name:'backtrack',id:'bt',arguments:{checkpoint:0,message:'Continue pending work.'}}]}:{},[backtrack],10,goalFirst,true);
     await h.session.prompt('Backtrack then continue');await settled(h.session);
     assert.equal(h.requests.length,2);
-    assert.match(JSON.stringify(h.requests[1].messages),/goal status: 1 todo/);
+    assert.match(JSON.stringify(h.requests[1].messages),/goal status: paused;/);
     assert.equal(h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('[goal status:')).length,1);
-    assert.equal(state(h).goals[0].setBy,'user');
+    assert.equal(state(h).text,'retained goal');
   });
-});
-
-test('successful backtrack result appends a persisted digest at turn boundary',async t=>{
-  const h=await fixture(t,n=>n===1?{content:[{type:'toolCall',name:'backtrack',id:'bt',arguments:{}}]}:{},[
-    pi=>pi.registerTool({name:'backtrack',label:'Backtrack',description:'test successful boundary tool',parameters:{type:'object',properties:{}},async execute(){return {content:[{type:'text',text:'Backtracked.'}],details:{status:'applied'}};}}),
-  ],10,false,true);
-  await h.session.prompt('Backtrack');await settled(h.session);
-  const digests=h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('[goal status:'));
-  assert.equal(digests.length,1);
-  assert.match(JSON.stringify(h.requests[1].messages),/goal status: 1 todo/);
-  assert.equal(state(h).run,null);
 });
