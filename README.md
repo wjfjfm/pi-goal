@@ -29,8 +29,8 @@ await tools.goal_update({status: "blocked"});  // 无法推进，停止自动继
 ```
 
 受阻后直接 `/goal resume` 即可重试；已完成或清除的目标不恢复，用 `/goal <目标>` 设置新目标。
-`goal_show` 只展示目标正文和状态。backtrack/compact 后仅补一行：
-`[goal status: active; tools.goal_show()]`，不启动执行。
+`goal_show` 只展示目标正文和状态。仅 active 时显示状态栏，并在 backtrack/compact 后补一行：
+`[pursuing goal (0h 43m 23s); codemode tools.goal_show() for detail]`，不启动执行。
 
 ## 自动继续保护
 

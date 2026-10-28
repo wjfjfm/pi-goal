@@ -129,7 +129,7 @@ test('aborting retry pauses without further model requests',async t=>{
   await new Promise(r=>setTimeout(r,30));await h.session.abort();await settled(h.session);
   assert.equal(h.requests.length,1);assert.equal(state(h).status,'paused');
 });
-test('compact injects a single-goal digest without resuming',async t=>{
+test('compact leaves a paused goal silent without resuming',async t=>{
   const h=await fixture(t,()=>({}),[
     pi=>pi.on('session_before_compact',event=>({compaction:{summary:'Test summary',firstKeptEntryId:event.preparation.firstKeptEntryId,tokensBefore:1}})),
   ],10,false,true);
@@ -138,16 +138,16 @@ test('compact injects a single-goal digest without resuming',async t=>{
   const before=JSON.stringify(state(h));await h.session.compact();
   assert.equal(h.requests.length,2);assert.equal(JSON.stringify(state(h)),before);
   await h.session.prompt('continue');await settled(h.session);
-  assert.match(JSON.stringify(h.requests[2].messages),/goal status: paused;/);
+  assert.doesNotMatch(JSON.stringify(h.requests[2].messages),/\[pursuing goal \(/);
 });
-test('actual pi-backtrack retains single-goal digest in either extension order',{skip:!process.env.PI_GOAL_BACKTRACK_TEST},async t=>{
+test('actual pi-backtrack keeps paused goals silent in either extension order',{skip:!process.env.PI_GOAL_BACKTRACK_TEST},async t=>{
   const {default:backtrack}=await import(process.env.PI_GOAL_BACKTRACK_TEST);
   for(const goalFirst of [false,true])await t.test(String(goalFirst),async t=>{
     const h=await fixture(t,n=>n===1?{content:[{type:'toolCall',name:'backtrack',id:'bt',arguments:{checkpoint:0,message:'Continue pending work.'}}]}:{},[backtrack],10,goalFirst,true);
     await h.session.prompt('Backtrack then continue');await settled(h.session);
     assert.equal(h.requests.length,2);
-    assert.match(JSON.stringify(h.requests[1].messages),/goal status: paused;/);
-    assert.equal(h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('[goal status:')).length,1);
+    assert.doesNotMatch(JSON.stringify(h.requests[1].messages),/\[pursuing goal \(/);
+    assert.equal(h.sm.getBranch().filter(e=>e.type==='custom_message'&&String(e.content).startsWith('[pursuing goal (')).length,0);
     assert.equal(state(h).text,'retained goal');
   });
 });

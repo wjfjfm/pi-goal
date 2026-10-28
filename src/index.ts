@@ -30,14 +30,14 @@ export default function goalExtension(pi: ExtensionAPI) {
     return g ? `Goal: ${g.text}\nStatus: ${g.status}\nRunning time: ${duration(state.elapsed())}` : "No goal set. Use /goal <text>.";
   }
   function updateStatus(ctx=uiContext) {
-    if (ctx?.hasUI) ctx.ui.setStatus(MESSAGE,state.goal && state.goal.status!=="closed" ? `Goal: ${state.goal.status} (${duration(state.elapsed())})` : undefined);
+    if (ctx?.hasUI) ctx.ui.setStatus(MESSAGE,state.goal?.status==="active" ? `Goal: ${state.goal.status} (${duration(state.elapsed())})` : undefined);
   }
   function save() { pi.appendEntry(ENTRY,state.snapshot()); updateStatus(); }
   function message(kind: string) {
     return {customType:MESSAGE,content:`Goal ${kind}:\n${summary()}\n\nOnly the user may set, replace, resume or clear the goal. Use codemode tools.goal_show() to inspect it, or tools.goal_update({status:"complete"}) when satisfied / tools.goal_update({status:"blocked"}) when unable to proceed. Do not expand scope or bypass required permissions or confirmations. Resume means retry, not that previous blockers are resolved.`,display:false};
   }
   function digest() {
-    return {customType:MESSAGE,content:`[goal status: ${state.goal?.status ?? "none"}; tools.goal_show()]`,display:true};
+    return {customType:MESSAGE,content:`[pursuing goal (${duration(state.elapsed())}); codemode tools.goal_show() for detail]`,display:true};
   }
   pi.registerTool({name:"goal_show",label:"Show goal",exposure:"codemode",annotations:{readOnlyHint:true},
     description:"Show the single user-set goal and its status. Read-only.",
@@ -124,7 +124,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     if (incoming.role==="custom" && incoming.customType===MESSAGE && (incoming.details as {goalDelivery?:string} | undefined)?.goalDelivery===pendingGoal) pendingGoal=undefined;
   });
   pi.on("tool_result",event=>{ if (event.toolName==="backtrack" && !event.isError) afterBacktrack=true; });
-  pi.on("session_compact",()=>{ pi.sendMessage(digest(),{triggerTurn:false}); });
+  pi.on("session_compact",()=>{ if (state.goal?.status==="active") pi.sendMessage(digest(),{triggerTurn:false}); });
   pi.on("agent_start",()=>{retryRequested=false;});
   pi.on("agent_settled",(_event,ctx)=>{
     if (retryRequested && state.goal?.status==="active") { cancelRetry(); state.transition("paused"); save(); ctx.ui.notify("Goal paused after interruption.","info"); }
@@ -132,7 +132,10 @@ export default function goalExtension(pi: ExtensionAPI) {
   pi.on("turn_end",(event,ctx)=>{
     if (state.goal?.status==="active") save();
     updateStatus(ctx);
-    if (afterBacktrack) { afterBacktrack=false; return {entries:[...event.entries,{type:"custom_message" as const,...digest()}]}; }
+    if (afterBacktrack) {
+      afterBacktrack=false;
+      if (state.goal?.status==="active") return {entries:[...event.entries,{type:"custom_message" as const,...digest()}]};
+    }
   });
   pi.on("session_start",(_event,ctx)=>restore(ctx));
   pi.on("session_tree",(_event,ctx)=>restore(ctx));

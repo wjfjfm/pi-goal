@@ -12,7 +12,7 @@
 - goal_update 必须 active、已送达且 signal 未取消。完成/阻塞都停止计时和自动继续；用户 resume 接受 paused/blocked，直接切回 active，不恢复 complete/closed。
 - goal_show 纯只读，模型正文只有 Goal/Status 两行（无目标为 No goal set.）；更新回复只有 Goal complete/blocked。诊断 details 保留 goal 快照、pendingDelivery、continuationBudget，不向模型展开元数据。无 ID、父子关系或清单字段。
 - set 重置累计用时和设置时间；resume 保留累计用时、记录 resumedAt；elapsed 不含暂停或离线时间。
-- 目标提示 display:false；compact/backtrack 摘要只显示 [goal status: <status>; tools.goal_show()]，display:true。/goal 使用通知，仅展示目标、状态和累计用时；TUI/RPC/print 通用。
+- 目标提示 display:false；compact/backtrack 摘要格式 [pursuing goal (0h 43m 23s); codemode tools.goal_show() for detail]，display:true；仅 active 时显示摘要与状态栏，其他状态不显示；时间为累计 active 用时。手动查询仍可查看所有状态。/goal 使用通知，仅展示目标、状态和累计用时；TUI/RPC/print 通用。
 
 ## 持久化与迁移
 
@@ -28,7 +28,7 @@
 - 用户设置/恢复共用唯一 goalDelivery + steer，匹配 message_start 才清除投递屏障，防止旧工具结果完成新目标。
 - pause/clear 关闭写回与自动继续，不中断工具，不撤销已排队提示。resume 建立新的投递屏障。
 - agent_before_settle 是自动继续边界，尊重 event.continue、pending messages 和投递屏障。
-- compact 成功后发送简短状态，triggerTurn:false。成功 backtrack tool_result 置标记，在整批工具 turn_end 的 event.entries 后追加一次摘要。失败不注入，不更改目标或预算。
+- compact 成功且 active 时发送简短状态，triggerTurn:false。成功 backtrack tool_result 置标记，在整批工具 turn_end 清除标记，仅 active 时在 event.entries 后追加一次摘要。失败不注入，不更改目标或预算。
 - restore/shutdown 取消重试；shutdown 将 active 保存为 paused。
 
 ## 模块重复提醒预算

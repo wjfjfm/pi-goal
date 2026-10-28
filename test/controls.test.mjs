@@ -38,12 +38,14 @@ test('only show and complete/blocked tools remain; no list, IDs, creation or edi
   await assert.rejects(()=>call(h,'goal_update',{status:'doing'}),/Only complete or blocked/);
   assert.equal(h.state().goal.status,'active');
 });
-test('show and status digest keep model-facing text minimal',async()=>{
+test('show and status digest keep model-facing text minimal',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:0});
   const h=fixture();assert.equal((await call(h,'goal_show')).content[0].text,'No goal set.');
   await h.run('work');
   assert.equal((await call(h,'goal_show')).content[0].text,'Goal: work\nStatus: active');
+  t.mock.timers.tick(2603000);
   h.handlers.session_compact({},h.ctx);
-  assert.equal(h.messages.at(-1).content,'[goal status: active; tools.goal_show()]');
+  assert.equal(h.messages.at(-1).content,'[pursuing goal (0h 43m 23s); codemode tools.goal_show() for detail]');
   await h.run('show');
   assert.match(h.notices.at(-1)[0],/Running time:/);
   assert.doesNotMatch(h.notices.at(-1)[0],/budget|setBy|setAt/);
@@ -187,15 +189,32 @@ test('pause, replacement, clear, restore and shutdown cancel pending retry',asyn
   }
 });
 test('compact/backtrack append a small single-goal digest and do not start execution',async()=>{
-  const h=fixture();await h.run('work');await h.run('pause');const before=h.entries.length;
+  const h=fixture();await h.run('work');const before=h.entries.length;
   h.handlers.session_compact({},h.ctx);
-  assert.match(h.messages.at(-1).content,/^\[goal status: paused;/);
+  assert.match(h.messages.at(-1).content,/^\[pursuing goal \(/);
   assert.equal(h.entries.length,before);
   h.handlers.tool_result({toolName:'backtrack',isError:true});assert.equal(h.handlers.turn_end({entries:[]},h.ctx),undefined);
   h.handlers.tool_result({toolName:'backtrack',isError:false});
   const existing={type:'custom',customType:'other',data:{}};
   const r=h.handlers.turn_end({entries:[existing]},h.ctx);
-  assert.deepEqual(r.entries[0],existing);assert.match(r.entries[1].content,/goal status: paused/);
+  assert.deepEqual(r.entries[0],existing);assert.match(r.entries[1].content,/pursuing goal \(/);
   assert.equal(h.handlers.turn_end({entries:[]},h.ctx),undefined);
-  assert.equal(h.state().goal.status,'paused');
+  assert.equal(h.state().goal.status,'active');
+});
+test('inactive goals never inject compact/backtrack status',async()=>{
+  for(const action of ['none','pause','blocked','complete','clear']){
+    const h=fixture();
+    if(action!=='none'){
+      await h.run('work');
+      if(action==='blocked'||action==='complete')await call(h,'goal_update',{status:action});
+      else await h.run(action);
+    }
+    const before=h.messages.length;
+    h.handlers.session_compact({},h.ctx);
+    assert.equal(h.messages.length,before);
+    h.handlers.tool_result({toolName:'backtrack',isError:false});
+    assert.equal(h.handlers.turn_end({entries:[]},h.ctx),undefined);
+    await h.run('new goal');
+    assert.equal(h.handlers.turn_end({entries:[]},h.ctx),undefined);
+  }
 });
